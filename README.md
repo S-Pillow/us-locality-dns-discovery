@@ -223,7 +223,7 @@ For handing the tool to a coworker who will run the packaged EXE:
 **What the coworker needs**
 
 - `USLocalityDNSDiscovery.exe`
-- Optional: this README or a short Quick Start note
+- Optional: this README or `Quick_Start.txt` (short operator steps)
 - Optional: a custom wordlist file **only if** they need extra labels beyond the built-in defaults
 
 **What they do not need**

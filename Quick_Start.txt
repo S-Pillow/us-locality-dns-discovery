@@ -1,0 +1,37 @@
+.US Locality DNS Discovery Tool — Quick Start
+==============================================
+
+1. Run USLocalityDNSDiscovery.exe
+   (Copy to a local folder if Windows SmartScreen blocks a network share.)
+
+2. Select input CSV or TXT
+   Use a small enriched CSV sample with third_level_domain and metadata columns.
+
+3. Choose Output Folder
+   Default is output\ beside the EXE. Use Browse to pick another writable folder.
+
+4. Select wordlist sources
+   Built-in wordlists are bundled in the EXE — no separate wordlists folder needed.
+   Optional: browse for a custom wordlist file and check Include custom wordlist.
+
+5. Review Preflight Summary
+   Confirm domains, metadata columns, output folder, and scan-size guidance.
+
+6. Run Scan
+   Progress bar and Cancel Scan stay available during the run.
+
+7. Export XLSX (recommended)
+   CSV, JSON, and All formats also write to the selected Output Folder.
+
+8. Open Evidence Review first
+   Rows are sorted strong → moderate → limited → inconclusive → none.
+
+9. Review strong/moderate rows
+   Use manual_verification_hint dig commands for spot checks.
+
+10. Manually verify selected rows before conclusions.
+
+Important: No records discovered does not prove absence of DNS activity or subdelegations.
+The scan does not provide complete zone enumeration.
+
+See README.md for batch sizes, performance guidance, and coworker handoff details.
