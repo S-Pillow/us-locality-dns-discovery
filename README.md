@@ -57,7 +57,40 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Requires `dnspython` (see `requirements.txt`). PyInstaller packaging is planned for a future ticket.
+Requires `dnspython` and `openpyxl` (see `requirements.txt`).
+
+## Windows EXE packaging
+
+Build a single-file, windowed executable (no console) with PyInstaller:
+
+```powershell
+cd us_locality_dns_discovery
+python -m pip install -r requirements.txt
+.\build_exe.bat
+```
+
+Or manually:
+
+```powershell
+python -m PyInstaller --noconfirm USLocalityDNSDiscovery.spec
+```
+
+Output:
+
+- `dist/USLocalityDNSDiscovery.exe`
+
+Double-click the EXE to launch the GUI. Python does **not** need to be installed on the target PC.
+
+### Packaged paths and wordlists
+
+| Mode | Built-in wordlists | Report output |
+|------|-------------------|---------------|
+| Source (`python app.py`) | Editable files in `wordlists/` | `output/` under project root |
+| Packaged EXE | Bundled read-only defaults (PyInstaller `_MEIPASS`) | `output/` next to the EXE |
+
+Custom wordlists remain selectable through the GUI file picker in both modes. Reports are **never** written to PyInstaller’s temporary extraction folder.
+
+`build/`, `dist/`, generated `.exe` files, and scan reports are gitignored and must not be committed.
 
 ## Scan behavior
 
@@ -143,6 +176,7 @@ us_locality_dns_discovery/
 ├── scanner/
 │   ├── __init__.py
 │   ├── models.py
+│   ├── paths.py
 │   ├── scan_engine.py
 │   └── export_service.py
 ├── wordlists/
@@ -153,6 +187,8 @@ us_locality_dns_discovery/
 │   ├── schools_libraries.txt
 │   └── delegated_manager_clues.txt
 ├── output/
+├── USLocalityDNSDiscovery.spec
+├── build_exe.bat
 ├── README.md
 ├── requirements.txt
 └── .gitignore
@@ -160,7 +196,6 @@ us_locality_dns_discovery/
 
 ## Out of scope (future tickets)
 
-- PyInstaller packaging
 - Web UI, authentication, database, or cloud hosting
 - External OSINT tools (Amass, dnsx, subfinder, etc.)
 

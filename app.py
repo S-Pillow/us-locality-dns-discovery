@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from scanner.export_service import export_results
 from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProgressUpdate, ScanRunResult
+from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
 from scanner.scan_engine import (
     build_preflight_summary,
     run_scan,
@@ -19,9 +20,9 @@ from scanner.scan_engine import (
 )
 
 APP_TITLE = ".US Locality DNS Discovery Tool"
-PROJECT_ROOT = Path(__file__).resolve().parent
-OUTPUT_DIR = PROJECT_ROOT / "output"
-WORDLISTS_DIR = PROJECT_ROOT / "wordlists"
+PROJECT_ROOT = get_app_base_dir()
+OUTPUT_DIR = get_output_dir()
+WORDLISTS_DIR = get_wordlists_dir()
 
 
 class DiscoveryApp(tk.Tk):

@@ -4,5 +4,5 @@
 dnspython>=2.6.0
 openpyxl>=3.1.0
 
-# Planned for a future packaging ticket:
-# pyinstaller>=6.0
+# Packaging (build machine only)
+pyinstaller>=6.0

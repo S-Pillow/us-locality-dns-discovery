@@ -27,6 +27,7 @@ from scanner.models import (
     ScanStatus,
     WordlistPlan,
 )
+from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
 from scanner.scan_engine import (
     build_preflight_summary,
     build_wordlist_plan,
@@ -63,6 +64,9 @@ __all__ = [
     "export_json",
     "export_results",
     "export_xlsx_report",
+    "get_app_base_dir",
+    "get_output_dir",
+    "get_wordlists_dir",
     "run_scan",
     "validate_domain_file",
     "validate_wordlist_file",
