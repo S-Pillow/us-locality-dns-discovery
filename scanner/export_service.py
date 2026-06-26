@@ -87,6 +87,16 @@ RECOMMENDED_REVIEW_ACTIONS = {
     "none": "No new child domains found by tested methods",
 }
 
+DISPLAY_RECOMMENDED_REVIEW_ACTIONS = {
+    "strong": "Manually verify new delegated child zone",
+    "moderate": "Review new child domain name",
+    "limited": "Optional review — generic or technical hostname",
+    "validation_only": "Informational only — known domain confirmed in DNS",
+    "context_only": "No action needed — base zone context only",
+    "inconclusive": "Rerun scan before drawing conclusions",
+    "none": "No action needed",
+}
+
 GENERIC_HOSTNAME_LABELS = frozenset(
     {
         "www",
@@ -159,18 +169,16 @@ SERVICE_HOSTNAME_LABELS = frozenset(
 EVIDENCE_REVIEW_COLUMNS = [
     "base_domain",
     "delegated_manager",
-    "zone",
     "evidence_value",
     "recommended_review_action",
     "new_child_domains_found",
     "new_child_domains_count",
     "new_delegated_domains_found",
+    "new_organizational_domains_found",
     "new_generic_hostnames_found",
     "new_technical_hostnames_found",
-    "new_organizational_domains_found",
     "known_domains_validated",
     "why",
-    "analysis_note",
     "manual_verification_hint",
     "limitation_note",
 ]
@@ -292,6 +300,155 @@ SUMMARY_STATUS_FILLS = {
     SCAN_STATUS_ERRORS_ONLY: PatternFill(fill_type="solid", fgColor="FFC7CE"),
     SCAN_STATUS_NO_RECORDS: PatternFill(fill_type="solid", fgColor="F8CBAD"),
 }
+
+EVIDENCE_VALUE_FILLS = {
+    "Strong": PatternFill(fill_type="solid", fgColor="C6EFCE"),
+    "Moderate": PatternFill(fill_type="solid", fgColor="BDD7EE"),
+    "Limited": PatternFill(fill_type="solid", fgColor="FFE699"),
+    "Validation only": PatternFill(fill_type="solid", fgColor="D9E1F2"),
+    "Context only": PatternFill(fill_type="solid", fgColor="EDEDED"),
+    "None": PatternFill(fill_type="solid", fgColor="F8CBAD"),
+    "Inconclusive": PatternFill(fill_type="solid", fgColor="FFC7CE"),
+}
+
+
+@dataclass(frozen=True)
+class SheetColumn:
+    """Internal row key plus coworker-facing XLSX header label."""
+
+    key: str
+    label: str
+
+
+def _sheet_columns(keys: list[str], labels: dict[str, str]) -> list[SheetColumn]:
+    return [SheetColumn(key, labels.get(key, key.replace("_", " ").title())) for key in keys]
+
+
+EVIDENCE_REVIEW_HEADER_LABELS = {
+    "base_domain": "Base domain",
+    "delegated_manager": "Delegated manager",
+    "evidence_value": "Evidence value",
+    "recommended_review_action": "Recommended review action",
+    "new_child_domains_found": "New child domains found",
+    "new_child_domains_count": "New child domains count",
+    "new_delegated_domains_found": "New delegated domains found",
+    "new_organizational_domains_found": "New organizational domains found",
+    "new_generic_hostnames_found": "New generic hostnames found",
+    "new_technical_hostnames_found": "New technical hostnames found",
+    "known_domains_validated": "Known domains validated",
+    "why": "Why",
+    "manual_verification_hint": "Manual verification hint",
+    "limitation_note": "Limitation note",
+}
+
+EVIDENCE_REVIEW_SHEET_COLUMNS = _sheet_columns(
+    EVIDENCE_REVIEW_COLUMNS,
+    EVIDENCE_REVIEW_HEADER_LABELS,
+)
+
+SUMMARY_HEADER_LABELS = {
+    "scan_timestamp": "Scan timestamp",
+    "base_domain": "Base domain",
+    "input_domain": "Input domain",
+    "delegated_manager": "Delegated manager",
+    "zone": "Zone",
+    "second_level_domain": "Second level domain",
+    "known_domains_from_system": "Known domains from system",
+    "known_domains_from_system_count": "Known domains from system count",
+    "known_domains_validated": "Known domains validated",
+    "known_domains_validated_count": "Known domains validated count",
+    "new_child_domains_found": "New child domains found",
+    "new_child_domains_count": "New child domains count",
+    "new_delegated_domains_found": "New delegated domains found",
+    "new_delegated_domains_count": "New delegated domains count",
+    "new_generic_hostnames_found": "New generic hostnames found",
+    "new_generic_hostnames_count": "New generic hostnames count",
+    "new_technical_hostnames_found": "New technical hostnames found",
+    "new_technical_hostnames_count": "New technical hostnames count",
+    "new_organizational_domains_found": "New organizational domains found",
+    "new_organizational_domains_count": "New organizational domains count",
+    "evidence_value": "Evidence value",
+    "why": "Why",
+    "recommended_review_action": "Recommended review action",
+    "manual_verification_hint": "Manual verification hint",
+    "scan_status": "Scan status",
+    "authoritative_nameservers": "Authoritative nameservers",
+    "axfr_status": "AXFR status",
+    "wildcard_suspected": "Wildcard suspected",
+    "base_zone_exists": "Base zone exists",
+    "candidate_names_tested": "Candidate names tested",
+    "wordlist_sources": "Wordlist sources",
+    "analysis_note": "Analysis note",
+    "limitation_note": "Limitation note",
+}
+
+SUMMARY_SHEET_COLUMNS = _sheet_columns(SUMMARY_COLUMNS, SUMMARY_HEADER_LABELS)
+
+FINDINGS_XLSX_COLUMN_KEYS = [
+    "discovered_name",
+    "known_domain",
+    "name_type",
+    "evidence_value",
+    "why",
+    "base_domain",
+    "tested_name",
+    "record_type",
+    "finding_type",
+    "confidence",
+    "source",
+    "nameserver",
+    "value",
+    "ttl",
+    "wildcard_suspected",
+    "axfr_status",
+    "error",
+    "wordlist_sources",
+    "notes",
+    "scan_timestamp",
+]
+
+FINDINGS_HEADER_LABELS = {
+    "scan_timestamp": "Scan timestamp",
+    "base_domain": "Base domain",
+    "discovered_name": "Discovered name",
+    "known_domain": "Known domain",
+    "name_type": "Name type",
+    "evidence_value": "Evidence value",
+    "why": "Why",
+    "tested_name": "Tested name",
+    "record_type": "Record type",
+    "finding_type": "Finding type",
+    "confidence": "Confidence",
+    "source": "Source",
+    "nameserver": "Nameserver",
+    "value": "Value",
+    "ttl": "TTL",
+    "wildcard_suspected": "Wildcard suspected",
+    "axfr_status": "AXFR status",
+    "error": "Error",
+    "wordlist_sources": "Wordlist sources",
+    "notes": "Notes",
+}
+
+FINDINGS_SHEET_COLUMNS = _sheet_columns(FINDINGS_XLSX_COLUMN_KEYS, FINDINGS_HEADER_LABELS)
+
+ERRORS_WARNINGS_HEADER_LABELS = {
+    "scan_timestamp": "Scan timestamp",
+    "base_domain": "Base domain",
+    "delegated_manager": "Delegated manager",
+    "zone": "Zone",
+    "warning_type": "Warning type",
+    "tested_name": "Tested name",
+    "record_type": "Record type",
+    "nameserver": "Nameserver",
+    "message": "Message",
+    "notes": "Notes",
+}
+
+ERRORS_WARNINGS_SHEET_COLUMNS = _sheet_columns(
+    ERRORS_WARNINGS_COLUMNS,
+    ERRORS_WARNINGS_HEADER_LABELS,
+)
 
 ExportFormat = Literal["xlsx", "csv", "json", "all"]
 
@@ -421,15 +578,30 @@ def _display_name_type(value: str) -> str:
     return DISPLAY_NAME_TYPE.get(value, value.replace("_", " ").title())
 
 
+def _display_boolean(value: str) -> str:
+    lowered = value.strip().lower()
+    if lowered in {"true", "yes", "1"}:
+        return "Yes"
+    if lowered in {"false", "no", "0"}:
+        return "No"
+    return value
+
+
 def _coworker_display_row(row: dict[str, str]) -> dict[str, str]:
     """Return a copy with human-readable classification fields for XLSX."""
     display = dict(row)
+    evidence_code = display.get("evidence_value", "").lower()
+    if evidence_code in DISPLAY_RECOMMENDED_REVIEW_ACTIONS:
+        display["recommended_review_action"] = DISPLAY_RECOMMENDED_REVIEW_ACTIONS[evidence_code]
     if "known_domain" in display:
         display["known_domain"] = _display_known_domain(display["known_domain"])
     if "evidence_value" in display:
         display["evidence_value"] = _display_evidence_value(display["evidence_value"])
     if "name_type" in display and display["name_type"]:
         display["name_type"] = _display_name_type(display["name_type"])
+    for bool_field in ("wildcard_suspected", "base_zone_exists"):
+        if bool_field in display and display[bool_field]:
+            display[bool_field] = _display_boolean(display[bool_field])
     return display
 
 
@@ -492,7 +664,9 @@ def _why_for_child_name(
         )
 
     if name_type == "alias_to_external_target":
-        return "Not a child name under the scanned base domain."
+        return (
+            "External CNAME target is not counted as a child domain under the scanned base domain."
+        )
 
     if known_domain and name_type == "delegated_child_zone":
         return "Already listed in the system and confirmed in DNS."
@@ -501,23 +675,20 @@ def _why_for_child_name(
         return "Already listed in the system and confirmed in DNS."
 
     if name_type == "delegated_child_zone":
-        if record and record.record_type == RecordType.SOA:
-            return "Confirms a delegated child zone with SOA records."
-        if record and record.record_type == RecordType.NS:
-            return "New delegated child zone found because the name has NS or SOA records."
-        return "New delegated child zone found because the name has NS or SOA records."
+        return "New delegated child domain found in live DNS and not listed in the system input."
 
     if name_type == "generic_hostname":
-        return "Found in live DNS but appears to be a generic hostname such as www or mail."
+        return (
+            "New hostname found in live DNS, but it appears to be a generic or technical service name."
+        )
 
     if name_type == "technical_vendor_hostname":
         return (
-            "Found in live DNS but appears to be a technical/vendor hostname such as "
-            "autodiscover or msoid."
+            "New hostname found in live DNS, but it appears to be a generic or technical service name."
         )
 
     if name_type in {"organizational_child_name", "service_hostname"}:
-        return "Found in live DNS and not listed in the system input."
+        return "New child domain found in live DNS and not listed in the system input."
 
     if evidence_value == "limited":
         target = _cname_target_for(fqdn, ctx)
@@ -526,9 +697,9 @@ def _why_for_child_name(
                 "New DNS alias/hostname found, but it points to a child domain already known "
                 "in the system."
             )
-        return "Found in live DNS and not listed in the system input."
+        return "New child domain found in live DNS and not listed in the system input."
 
-    return "Found in live DNS and not listed in the system input."
+    return "New child domain found in live DNS and not listed in the system input."
 
 
 def _why_for_domain_summary(
@@ -545,33 +716,32 @@ def _why_for_domain_summary(
     validated_count = int(comparison.get("known_domains_validated_count", 0))
 
     if evidence_value == "strong" or new_delegated_count > 0:
-        return "New child domains were found in live DNS that were not listed in the system input."
+        return "New delegated child domain found in live DNS and not listed in the system input."
 
     if evidence_value == "moderate" and new_count > 0:
-        return "New child domains were found in live DNS that were not listed in the system input."
+        return "New child domain found in live DNS and not listed in the system input."
 
     if evidence_value == "limited" and new_count > 0:
         if new_delegated_count == 0 and validated_count > 0:
             return (
-                "New DNS names were found, but evidence is limited "
-                "(for example aliases to known domains)."
+                "New DNS alias/hostname found, but it points to a child domain already known "
+                "in the system."
             )
-        if int(comparison.get("new_generic_hostnames_count", 0)) > 0 or int(
-            comparison.get("new_technical_hostnames_count", 0)
-        ) > 0:
-            return "Only generic or technical hostnames were found; useful context but limited evidence."
-        return "New DNS names were found, but evidence is limited."
+        return (
+            "New hostname found in live DNS, but it appears to be a generic or technical "
+            "service name."
+        )
 
     if evidence_value == "validation_only" or (validated_count > 0 and new_count == 0):
-        return "Only known child domains were validated; no new child domains were discovered."
+        return "Only domains already listed in the system input were confirmed in DNS."
 
     if evidence_value == "context_only":
         return "Only base-domain DNS evidence was found; no child domains were discovered by tested methods."
 
     if evidence_value == "none":
-        return "No child DNS names were discovered using tested methods."
+        return "No child domains were discovered by the selected methods."
 
-    return "No new child domains found using tested methods."
+    return "No child domains were discovered by the selected methods."
 
 
 def _collect_dns_discovered_children(
@@ -1966,53 +2136,151 @@ def build_json_document(result: ScanRunResult) -> dict:
     }
 
 
+def build_how_to_read_rows() -> list[tuple[str, str]]:
+    """Build short coworker guidance for the How to Read workbook sheet."""
+    return [
+        (
+            "What this report is for",
+            "This report checks whether live DNS contains child names under known 3rd-level "
+            ".US domains that were not listed in the system input.",
+        ),
+        (
+            "Known domain",
+            "Known domain = Yes means the discovered name was already listed in the input/system "
+            "data. Known domain = No means the name was found in live DNS but was not listed in "
+            "the input/system data.",
+        ),
+        (
+            "New child domains found",
+            "Lists DNS names beneath the scanned base domain that were found in live DNS testing "
+            "but were not already listed in the system input. Some may be service hostnames "
+            "(for example www or mail) rather than separately registered domains.",
+        ),
+        (
+            "Evidence value — Strong",
+            "Strong evidence usually means a new delegated child domain was found with NS or SOA "
+            "records.",
+        ),
+        (
+            "Evidence value — Moderate",
+            "Moderate evidence means a new meaningful child name was found, such as an "
+            "organizational or service name.",
+        ),
+        (
+            "Evidence value — Limited",
+            "Limited evidence usually means a generic or technical hostname such as www, mail, or "
+            "autodiscover, or a DNS alias pointing to a domain already known in the system.",
+        ),
+        (
+            "Evidence value — Validation only",
+            "Known domains validated are not new discoveries. They confirm names already listed "
+            "in the system input.",
+        ),
+        (
+            "Why column",
+            "The Why column explains, in plain language, why each row received its evidence "
+            "value or classification.",
+        ),
+        (
+            "What this report cannot prove",
+            "No records discovered does not prove no child domains exist. It only means none were "
+            "found using the selected methods.",
+        ),
+        (
+            "Suggested review path",
+            "Open Evidence Review first. Focus on Strong and Moderate rows for coworker review. "
+            "Read Why for context. Use Manual verification hint for optional dig commands.",
+        ),
+    ]
+
+
 def _write_table_sheet(
     worksheet: Worksheet,
-    headers: list[str],
+    columns: list[SheetColumn] | list[str],
     rows: list[dict[str, str]] | list[tuple[str, str]],
-    wrap_columns: set[str] | None = None,
-    status_column: str | None = None,
+    *,
+    wrap_column_keys: set[str] | None = None,
+    highlight_column_key: str | None = None,
+    highlight_fill_map: dict[str, PatternFill] | None = None,
+    status_column_key: str | None = None,
     status_fill_map: dict[str, PatternFill] | None = None,
+    tuple_column_labels: tuple[str, str, str, str] | None = None,
 ) -> None:
-    wrap_columns = wrap_columns or set()
+    """Write a worksheet table. Tuple rows use (key, label, key, label) column metadata."""
+    wrap_column_keys = wrap_column_keys or set()
     header_font = Font(bold=True)
     wrap_alignment = Alignment(wrap_text=True, vertical="top")
 
     if rows and isinstance(rows[0], tuple):
-        worksheet.append(["Setting", "Value"])
+        left_key, left_label, right_key, right_label = tuple_column_labels or (
+            "setting",
+            "Setting",
+            "value",
+            "Value",
+        )
+        worksheet.append([left_label, right_label])
         for row in rows:
             worksheet.append(list(row))
-        headers = ["Setting", "Value"]
-    else:
+        sheet_columns = [
+            SheetColumn(left_key, left_label),
+            SheetColumn(right_key, right_label),
+        ]
+    elif columns and isinstance(columns[0], SheetColumn):
+        sheet_columns = columns
+        headers = [column.label for column in sheet_columns]
         worksheet.append(headers)
         for row in rows:
-            worksheet.append([row.get(column, "") for column in headers])
+            worksheet.append([row.get(column.key, "") for column in sheet_columns])
+    else:
+        sheet_columns = [SheetColumn(key, key) for key in columns]
+        headers = [column.label for column in sheet_columns]
+        worksheet.append(headers)
+        for row in rows:
+            worksheet.append([row.get(column.key, "") for column in sheet_columns])
 
     for cell in worksheet[1]:
         cell.font = header_font
 
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = worksheet.dimensions
+    if worksheet.max_row > 1:
+        worksheet.auto_filter.ref = worksheet.dimensions
 
-    for index, header in enumerate(headers, start=1):
+    for index, column in enumerate(sheet_columns, start=1):
         column_letter = get_column_letter(index)
-        max_length = len(header)
+        max_length = len(column.label)
         for row_cells in worksheet.iter_rows(min_row=2, min_col=index, max_col=index):
             for cell in row_cells:
                 value = "" if cell.value is None else str(cell.value)
                 max_length = max(max_length, min(len(value), 80))
-                if header in wrap_columns:
+                if column.key in wrap_column_keys:
                     cell.alignment = wrap_alignment
         worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 60)
 
-    if status_column and status_fill_map and status_column in headers:
-        status_index = headers.index(status_column) + 1
-        for row_index in range(2, worksheet.max_row + 1):
-            cell = worksheet.cell(row=row_index, column=status_index)
-            fill = status_fill_map.get(str(cell.value))
-            if fill:
-                for col in range(1, len(headers) + 1):
-                    worksheet.cell(row=row_index, column=col).fill = fill
+    if highlight_column_key and highlight_fill_map:
+        highlight_index = next(
+            (idx + 1 for idx, col in enumerate(sheet_columns) if col.key == highlight_column_key),
+            None,
+        )
+        if highlight_index:
+            for row_index in range(2, worksheet.max_row + 1):
+                cell = worksheet.cell(row=row_index, column=highlight_index)
+                fill = highlight_fill_map.get(str(cell.value))
+                if fill:
+                    for col in range(1, len(sheet_columns) + 1):
+                        worksheet.cell(row=row_index, column=col).fill = fill
+
+    if status_column_key and status_fill_map:
+        status_index = next(
+            (idx + 1 for idx, col in enumerate(sheet_columns) if col.key == status_column_key),
+            None,
+        )
+        if status_index:
+            for row_index in range(2, worksheet.max_row + 1):
+                cell = worksheet.cell(row=row_index, column=status_index)
+                fill = status_fill_map.get(str(cell.value))
+                if fill:
+                    for col in range(1, len(sheet_columns) + 1):
+                        worksheet.cell(row=row_index, column=col).fill = fill
 
 
 def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
@@ -2027,9 +2295,9 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     review_rows = [_coworker_display_row(row) for row in build_evidence_review_rows(result)]
     _write_table_sheet(
         review_sheet,
-        EVIDENCE_REVIEW_COLUMNS,
+        EVIDENCE_REVIEW_SHEET_COLUMNS,
         review_rows,
-        wrap_columns={
+        wrap_column_keys={
             "new_child_domains_found",
             "new_delegated_domains_found",
             "new_generic_hostnames_found",
@@ -2037,19 +2305,29 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
             "new_organizational_domains_found",
             "known_domains_validated",
             "why",
-            "analysis_note",
             "manual_verification_hint",
             "limitation_note",
         },
+        highlight_column_key="evidence_value",
+        highlight_fill_map=EVIDENCE_VALUE_FILLS,
+    )
+
+    how_to_read_sheet = workbook.create_sheet("How to Read", 1)
+    _write_table_sheet(
+        how_to_read_sheet,
+        [],
+        build_how_to_read_rows(),
+        wrap_column_keys={"value"},
+        tuple_column_labels=("topic", "Topic", "value", "Explanation"),
     )
 
     summary_sheet = workbook.create_sheet("Summary")
     summary_rows = [_coworker_display_row(row) for row in build_summary_rows(result)]
     _write_table_sheet(
         summary_sheet,
-        SUMMARY_COLUMNS,
+        SUMMARY_SHEET_COLUMNS,
         summary_rows,
-        wrap_columns={
+        wrap_column_keys={
             "why",
             "analysis_note",
             "limitation_note",
@@ -2064,7 +2342,9 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
             "new_technical_hostnames_found",
             "new_organizational_domains_found",
         },
-        status_column="scan_status",
+        highlight_column_key="evidence_value",
+        highlight_fill_map=EVIDENCE_VALUE_FILLS,
+        status_column_key="scan_status",
         status_fill_map=SUMMARY_STATUS_FILLS,
     )
 
@@ -2072,9 +2352,9 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     findings_rows = [_coworker_display_row(row) for row in build_findings_rows(result)]
     _write_table_sheet(
         findings_sheet,
-        CSV_COLUMNS,
+        FINDINGS_SHEET_COLUMNS,
         findings_rows,
-        wrap_columns={"value", "why", "notes", "error", "nameserver"},
+        wrap_column_keys={"value", "why", "notes", "error", "nameserver"},
     )
 
     settings_sheet = workbook.create_sheet("Scan Settings")
@@ -2082,7 +2362,7 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         settings_sheet,
         [],
         build_settings_rows(result),
-        wrap_columns={"Value"},
+        wrap_column_keys={"value"},
     )
 
     warnings_sheet = workbook.create_sheet("Errors Warnings")
@@ -2102,9 +2382,9 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         ]
     _write_table_sheet(
         warnings_sheet,
-        ERRORS_WARNINGS_COLUMNS,
+        ERRORS_WARNINGS_SHEET_COLUMNS,
         warning_rows,
-        wrap_columns={"message", "notes"},
+        wrap_column_keys={"message", "notes"},
     )
 
     workbook.save(path)

@@ -16,7 +16,8 @@ Internal-use **standalone Windows desktop utility** (Python 3.11+) for **unknown
 4. Review **Preflight Summary** (selected domain column, first domains, profile, candidate estimate).
 5. Click **Run Scan** and watch the **phase/progress** text.
 6. Click **Export Results** → **XLSX workbook (recommended)**.
-7. Open **Evidence Review** first (sorted strong → moderate → limited → validation_only → context_only → inconclusive → none).
+7. Open **Evidence Review** first (sorted Strong → Moderate → Limited → etc.).
+8. Read the **Why** column for plain-English context; use **How to Read** for definitions.
 8. Review `new_child_domains_found`, `evidence_value`, and `manual_verification_hint`.
 9. Manually verify a few strong/moderate rows before conclusions.
 
@@ -340,11 +341,14 @@ Reports are written to the **selected Output Folder** (default shown in the GUI)
 
 | Sheet | Purpose |
 |-------|---------|
-| **Evidence Review** | **Open this first for coworker review.** One row per base domain, sorted by `evidence_value` (strong → moderate → limited → etc.). |
-| **Summary** | Full per-domain rollup with `known_domains_from_system`, `new_child_domains_found`, `evidence_value`, and `manual_verification_hint`. |
-| **Findings** | Detailed rows per DNS finding with `discovered_name`, `known_domain`, `name_type`, and `evidence_value`. |
+| **Evidence Review** | **Open this first for coworker review.** One row per base domain with human-readable headers, **Why** explanations, and evidence-value highlighting. |
+| **How to Read** | Short definitions of Known domain, evidence values, and what the report can and cannot prove. |
+| **Summary** | Full per-domain rollup with input context, known/new domain lists, evidence value, scan status, and dig hints. |
+| **Findings** | Detailed rows per DNS finding. Readable columns first (Discovered name, Known domain, Name type, Evidence value, Why), then technical fields. |
 | **Scan Settings** | Scan profile, input format, evidence model definitions, `packaged_mode`, and `output_folder`. |
 | **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
+
+**Coworker review path:** Evidence Review → **How to Read** (if needed) → Summary for detail → Findings for line-item DNS evidence. Focus on **Strong** and **Moderate** rows; **Limited** rows are often generic hostnames; **Validation only** confirms known input domains, not new discoveries.
 
 Summary `scan_status` values use discovery-based wording such as *Possible delegated child zone discovered*, *DNS activity discovered*, *DNS activity discovered with scan errors*, *Base domain zone exists*, *Base domain records only*, *Scan incomplete / error*, *Scan errors only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
 

@@ -43,15 +43,16 @@ are not required.
    CSV, JSON, and All formats also write to the selected Output Folder.
 
 8. Open Evidence Review first
-   Rows are sorted by evidence_value: strong → moderate → limited → etc.
+   Rows are sorted by evidence strength (Strong → Moderate → Limited → etc.).
+   Column headers are human-readable (for example "Base domain", "Why").
 
-9. Review new_child_domains_found and evidence_value
-   - strong: new delegated child zone (NS/SOA)
-   - moderate: new organizational/service child name (police, portal, library…)
-   - limited: new generic/technical hostname (www, mail, autodiscover…)
-   - validation_only: known child confirmed in DNS (not a new discovery)
+9. Read the Why column; open How to Read for definitions
+   - Strong: new delegated child zone (NS/SOA) not in system input
+   - Moderate: new meaningful child name not in system input
+   - Limited: generic/technical hostname or alias to known domain
+   - Validation only: known domain confirmed in DNS (not a new discovery)
 
-10. Use manual_verification_hint dig commands and verify selected rows.
+10. Use Manual verification hint for optional dig commands.
 
 Important:
 * zone and second_level_domain are optional — workbook fields may be blank.
