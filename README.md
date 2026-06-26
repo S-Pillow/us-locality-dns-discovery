@@ -122,6 +122,33 @@ Duplicate domains are deduplicated; first-seen metadata is kept. Blank rows are 
 
 Use enriched CSV when scanning a sample from a larger spreadsheet so the workbook can explain **why each domain matters** (delegated manager, zone, known child domains) alongside DNS findings.
 
+### Known input child domains vs DNS-discovered names
+
+The workbook separates two sources of child-domain information:
+
+| Source | Meaning |
+|--------|---------|
+| **Known child domains (input)** | 4th/5th-level names already listed in your spreadsheet (`fourth_level_domains`, `fifth_level_domains`). These are system-known, not new discoveries. |
+| **DNS-discovered child names (scan)** | Child names found through live DNS testing (`standard_record`, `delegated_child_zone`, candidate `zone_soa_discovered`, AXFR child records). |
+
+Summary comparison columns include:
+
+- `known_child_domains_from_input` — normalized names from input metadata
+- `dns_discovered_child_names` — child names found by the scan
+- `dns_discovered_child_names_not_in_input` — live DNS names **not** listed in the input (strongest visibility-gap evidence)
+- `delegated_child_zones_not_in_input` — NS-based child zones not listed in the input
+- `evidence_support_level` — `strong` / `moderate` / `limited` / `none` / `inconclusive` support for the visibility-gap claim
+- `analysis_note` — plain-language comparison of input metadata vs live DNS findings
+
+**How to read evidence:**
+
+- **Strong:** delegated child zone or AXFR child name found that was not in the input child-domain fields.
+- **Moderate:** other DNS-discovered child activity not listed in the input.
+- **Limited:** base-zone evidence only, or DNS activity only on input-known child names.
+- **None / inconclusive:** no useful DNS evidence, or scan error — rerun before drawing conclusions.
+
+Lack of DNS-discovered names does **not** prove absence of activity. Scan a **small targeted subset** (not all ~2,000 domains) using the batch guidance above.
+
 ## Windows EXE packaging
 
 Build a single-file, windowed executable (no console) with PyInstaller:

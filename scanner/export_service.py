@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.models import (
     DiscoveredRecord,
     DomainInputRecord,
@@ -44,7 +45,11 @@ DISCOVERY_LIMITATION = (
 CONTEXT_LIMITATION = (
     "Results are based on selected input domains, selected wordlists, and tested DNS methods. "
     "Findings support that DNS activity can exist inside externally managed zones, "
-    "but they do not provide a complete zone inventory."
+    "but they do not provide a complete zone inventory. "
+    "Known child-domain fields come from the input dataset and represent system-known information. "
+    "DNS-discovered child names come from live DNS testing using selected wordlists and tested DNS methods. "
+    "DNS-discovered names not present in the input may support the visibility-gap claim, "
+    "but the scan does not provide complete zone enumeration."
 )
 
 PARTIAL_SCAN_NOTE = (
@@ -85,7 +90,19 @@ SUMMARY_COLUMNS = [
     "known_fourth_level_count",
     "known_fifth_level_count",
     "known_fourth_level_domains",
+    "known_fourth_level_domains",
     "known_fifth_level_domains",
+    "known_child_domains_from_input",
+    "known_child_domains_from_input_count",
+    "dns_discovered_child_names",
+    "dns_discovered_child_names_count",
+    "dns_discovered_child_names_already_known",
+    "dns_discovered_child_names_already_known_count",
+    "dns_discovered_child_names_not_in_input",
+    "dns_discovered_child_names_not_in_input_count",
+    "delegated_child_zones_not_in_input",
+    "delegated_child_zones_not_in_input_count",
+    "evidence_support_level",
     "scan_status",
     "authoritative_nameservers",
     "axfr_status",
@@ -208,45 +225,206 @@ def _input_metadata_values(domain_result: DomainScanResult) -> dict[str, str]:
     }
 
 
-def _has_known_child_domains(input_record: DomainInputRecord | None) -> bool:
-    if input_record is None:
+def _is_child_name(fqdn: str, base_domain: str) -> bool:
+    child = normalize_domain_name(fqdn)
+    base = normalize_domain_name(base_domain)
+    if child == base:
         return False
-    if input_record.known_fourth_level_domains or input_record.known_fifth_level_domains:
-        return True
-    for count_value in (input_record.fourth_level_count, input_record.fifth_level_count):
-        if count_value and count_value.strip() not in {"", "0"}:
-            return True
-    return False
+    return child.endswith(f".{base}")
+
+
+def _join_domain_list(names: set[str]) -> str:
+    return "; ".join(sorted(names))
+
+
+def _collect_dns_discovered_children(
+    domain_result: DomainScanResult,
+) -> tuple[set[str], set[str], bool]:
+    """
+    Return DNS-discovered child names, delegated child zone names, and base-only flag.
+
+    Child names come from standard_record, delegated_child_zone, zone_soa_discovered
+    (below base), and axfr_success (below base).
+    """
+    base = domain_result.domain
+    child_names: set[str] = set()
+    delegated_children: set[str] = set()
+    base_evidence = False
+
+    for record in domain_result.records:
+        classification = record.classification
+        fqdn = normalize_domain_name(record.fqdn)
+
+        if classification in {
+            FindingClassification.QUERY_ERROR,
+            FindingClassification.SCAN_ERROR,
+            FindingClassification.AXFR_BLOCKED,
+            FindingClassification.NO_RECORDS_DISCOVERED,
+            FindingClassification.AUTHORITATIVE_NS,
+        }:
+            continue
+
+        if classification in {
+            FindingClassification.BASE_DOMAIN_RECORD,
+            FindingClassification.BASE_ZONE_EXISTS,
+        }:
+            if fqdn == normalize_domain_name(base):
+                base_evidence = True
+            continue
+
+        if classification == FindingClassification.ZONE_SOA_DISCOVERED:
+            if _is_child_name(fqdn, base):
+                child_names.add(fqdn)
+            elif fqdn == normalize_domain_name(base):
+                base_evidence = True
+            continue
+
+        if classification == FindingClassification.DELEGATED_CHILD_ZONE:
+            if _is_child_name(fqdn, base):
+                child_names.add(fqdn)
+                delegated_children.add(fqdn)
+            continue
+
+        if classification == FindingClassification.STANDARD_RECORD:
+            if _is_child_name(fqdn, base):
+                child_names.add(fqdn)
+            continue
+
+        if classification == FindingClassification.AXFR_SUCCESS:
+            if _is_child_name(fqdn, base):
+                child_names.add(fqdn)
+            elif fqdn == normalize_domain_name(base):
+                base_evidence = True
+            continue
+
+    dns_discovered_base_only = base_evidence and not child_names
+    return child_names, delegated_children, dns_discovered_base_only
+
+
+def _compare_known_vs_discovered(
+    domain_result: DomainScanResult,
+) -> dict[str, str | int | bool]:
+    known = known_child_domains_from_record(domain_result.input_record)
+    discovered, delegated_discovered, dns_discovered_base_only = _collect_dns_discovered_children(
+        domain_result
+    )
+
+    already_known = discovered & known
+    not_in_input = discovered - known
+    delegated_not_in_input = delegated_discovered - known
+
+    return {
+        "known_child_domains_from_input": _join_domain_list(known),
+        "known_child_domains_from_input_count": len(known),
+        "dns_discovered_child_names": _join_domain_list(discovered),
+        "dns_discovered_child_names_count": len(discovered),
+        "dns_discovered_child_names_already_known": _join_domain_list(already_known),
+        "dns_discovered_child_names_already_known_count": len(already_known),
+        "dns_discovered_child_names_not_in_input": _join_domain_list(not_in_input),
+        "dns_discovered_child_names_not_in_input_count": len(not_in_input),
+        "delegated_child_zones_not_in_input": _join_domain_list(delegated_not_in_input),
+        "delegated_child_zones_not_in_input_count": len(delegated_not_in_input),
+        "_dns_discovered_base_only": dns_discovered_base_only,
+        "_known_set": known,
+        "_discovered_set": discovered,
+        "_delegated_not_in_input_set": delegated_not_in_input,
+    }
+
+
+def _axfr_child_names_not_in_input(domain_result: DomainScanResult, known: set[str]) -> set[str]:
+    base = normalize_domain_name(domain_result.domain)
+    not_in_input: set[str] = set()
+    for record in domain_result.records:
+        if record.classification != FindingClassification.AXFR_SUCCESS:
+            continue
+        fqdn = normalize_domain_name(record.fqdn)
+        if fqdn != base and _is_child_name(fqdn, domain_result.domain) and fqdn not in known:
+            not_in_input.add(fqdn)
+    return not_in_input
+
+
+def _evidence_support_level(
+    domain_result: DomainScanResult,
+    counts: dict[str, int],
+    scan_status: str,
+    comparison: dict[str, str | int | bool],
+) -> str:
+    if _domain_has_scan_error(domain_result):
+        return "inconclusive"
+
+    delegated_not_in_input = int(comparison["delegated_child_zones_not_in_input_count"])
+    dns_not_in_input = int(comparison["dns_discovered_child_names_not_in_input_count"])
+    known = comparison["_known_set"]
+    axfr_children_not_in_input = _axfr_child_names_not_in_input(domain_result, known)  # type: ignore[arg-type]
+
+    if delegated_not_in_input > 0 or axfr_children_not_in_input:
+        return "strong"
+
+    if dns_not_in_input > 0:
+        return "moderate"
+
+    discovered_count = int(comparison["dns_discovered_child_names_count"])
+    already_known_count = int(comparison["dns_discovered_child_names_already_known_count"])
+    has_base_zone = counts["base_zone_exists_flag"] > 0
+    has_live_dns = (
+        discovered_count > 0
+        or counts["delegated_child_zones"] > 0
+        or has_base_zone
+        or counts["axfr_success"] > 0
+    )
+
+    if has_base_zone or (has_live_dns and discovered_count > 0 and discovered_count == already_known_count):
+        return "limited"
+
+    if scan_status == SCAN_STATUS_NO_RECORDS or not has_live_dns:
+        return "none"
+
+    return "limited"
 
 
 def _analysis_note(
     domain_result: DomainScanResult,
     counts: dict[str, int],
     scan_status: str,
+    comparison: dict[str, str | int | bool],
 ) -> str:
     if _domain_has_scan_error(domain_result):
         return "Scan incomplete/error; rerun before drawing conclusions."
 
-    has_known_children = _has_known_child_domains(domain_result.input_record)
-    has_live_dns = (
-        counts["dns_names_with_records"] > 0
-        or counts["delegated_child_zones"] > 0
-        or counts["base_zone_exists_flag"] > 0
-        or counts["axfr_success"] > 0
-    )
+    dns_not_in_input = int(comparison["dns_discovered_child_names_not_in_input_count"])
+    discovered_count = int(comparison["dns_discovered_child_names_count"])
+    already_known_count = int(comparison["dns_discovered_child_names_already_known_count"])
+    known_count = int(comparison["known_child_domains_from_input_count"])
+    dns_discovered_base_only = bool(comparison["_dns_discovered_base_only"])
 
-    if has_known_children:
-        if has_live_dns:
-            return "Input lists known child domains; live DNS activity was also discovered."
-        return "Input lists known child domains, but no live DNS activity was discovered in this scan."
+    if dns_not_in_input > 0:
+        return (
+            "DNS-discovered child activity was found that was not listed in the "
+            "input child-domain fields."
+        )
 
-    if has_live_dns:
-        return "Input lists no known child domains; live DNS activity was discovered through tested methods."
+    if discovered_count > 0 and discovered_count == already_known_count:
+        return "DNS activity was found only on child domains already listed in the input."
+
+    if known_count > 0 and discovered_count == 0:
+        return (
+            "Input lists known child domains, but this scan did not discover live "
+            "DNS evidence for them."
+        )
+
+    if dns_discovered_base_only:
+        return (
+            "Only base-zone evidence was found; no child DNS names were discovered "
+            "by tested methods."
+        )
 
     if scan_status == SCAN_STATUS_NO_RECORDS:
-        return "No records discovered using tested methods; this does not prove absence."
+        return "No records discovered using selected methods; this does not prove absence."
 
-    return "No records discovered using tested methods; this does not prove absence."
+    if discovered_count > 0:
+        return "DNS activity was found only on child domains already listed in the input."
+
+    return "No records discovered using selected methods; this does not prove absence."
 
 
 def _wordlist_sources_text(result: ScanRunResult) -> str:
@@ -695,12 +873,22 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
     for domain_result in result.domain_results:
         counts = _domain_summary_counts(domain_result)
         metadata = _input_metadata_values(domain_result)
+        comparison = _compare_known_vs_discovered(domain_result)
         scan_status = _determine_scan_status(domain_result, counts)
+        comparison_export = {
+            key: str(value)
+            for key, value in comparison.items()
+            if not key.startswith("_")
+        }
         rows.append(
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": domain_result.domain,
                 **metadata,
+                **comparison_export,
+                "evidence_support_level": _evidence_support_level(
+                    domain_result, counts, scan_status, comparison
+                ),
                 "scan_status": scan_status,
                 "authoritative_nameservers": "; ".join(_authoritative_nameservers(domain_result)),
                 "axfr_status": _domain_axfr_status(domain_result, axfr_enabled),
@@ -713,7 +901,7 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "candidate_names_tested": str(counts["candidates_tested"]),
                 "wordlist_sources": wordlist_sources,
                 "evidence_summary": _evidence_summary(domain_result, counts),
-                "analysis_note": _analysis_note(domain_result, counts, scan_status),
+                "analysis_note": _analysis_note(domain_result, counts, scan_status, comparison),
                 "limitation_note": _limitation_note(result),
             }
         )
@@ -1027,12 +1215,25 @@ def build_json_document(result: ScanRunResult) -> dict:
             if item:
                 findings.append(item)
 
+        comparison = _compare_known_vs_discovered(domain_result)
+        scan_status = _determine_scan_status(domain_result, counts)
+        comparison_export = {
+            key: value
+            for key, value in comparison.items()
+            if not key.startswith("_")
+        }
+
         domains.append(
             {
                 "base_domain": domain_result.domain,
                 "input_domain": domain_result.input_record.original_domain if domain_result.input_record else None,
                 "delegated_manager": _input_metadata_values(domain_result)["delegated_manager"] or None,
                 "zone": _input_metadata_values(domain_result)["zone"] or None,
+                "known_vs_dns_comparison": comparison_export,
+                "evidence_support_level": _evidence_support_level(
+                    domain_result, counts, scan_status, comparison
+                ),
+                "analysis_note": _analysis_note(domain_result, counts, scan_status, comparison),
                 "wildcard_suspected": domain_result.wildcard_suspected,
                 "scan_failed": domain_result.scan_failed,
                 "authoritative_nameservers": _authoritative_nameservers(domain_result),
@@ -1122,6 +1323,11 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
             "wordlist_sources",
             "known_fourth_level_domains",
             "known_fifth_level_domains",
+            "known_child_domains_from_input",
+            "dns_discovered_child_names",
+            "dns_discovered_child_names_already_known",
+            "dns_discovered_child_names_not_in_input",
+            "delegated_child_zones_not_in_input",
         },
         status_column="scan_status",
         status_fill_map=SUMMARY_STATUS_FILLS,

@@ -51,8 +51,13 @@ def normalize_header(header: str) -> str:
     return " ".join(header.strip().lower().replace("_", " ").split())
 
 
-def _display_name(name: str) -> str:
+def normalize_domain_name(name: str) -> str:
+    """Normalize a domain name for comparison (lowercase, trim, no trailing dot)."""
     return name.strip().lower().rstrip(".")
+
+
+def _display_name(name: str) -> str:
+    return normalize_domain_name(name)
 
 
 def _looks_like_domain(value: str) -> bool:
@@ -62,12 +67,38 @@ def _looks_like_domain(value: str) -> bool:
     return "." in value and " " not in value
 
 
-def _split_domain_list(value: str) -> list[str]:
+def split_domain_list(value: str) -> list[str]:
+    """Split a delimited domain list and return normalized unique names."""
     if not value or not str(value).strip():
         return []
     text = str(value).strip()
-    parts = re.split(r"[;\n]+", text)
-    return [part.strip() for part in parts if part.strip()]
+    parts = re.split(r"[;\n,|]+", text)
+    seen: set[str] = set()
+    domains: list[str] = []
+    for part in parts:
+        normalized = normalize_domain_name(part)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            domains.append(normalized)
+    return domains
+
+
+def known_child_domains_from_record(record: DomainInputRecord | None) -> set[str]:
+    """Return normalized known 4th/5th-level domains from input metadata."""
+    if record is None:
+        return set()
+    known: set[str] = set()
+    for raw in record.known_fourth_level_domains + record.known_fifth_level_domains:
+        normalized = normalize_domain_name(raw)
+        if normalized:
+            known.add(normalized)
+    return known
+
+
+def _split_domain_list(value: str) -> list[str]:
+    if not value or not str(value).strip():
+        return []
+    return split_domain_list(value)
 
 
 def _parse_count(value: str) -> str:
