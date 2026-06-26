@@ -12,9 +12,11 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from scanner.export_service import export_results
 from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProgressUpdate, ScanRunResult
 from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
+from scanner.input_loader import load_domain_inputs
 from scanner.scan_engine import (
     build_preflight_summary,
     run_scan,
+    validate_domain_input,
     validate_domain_file,
     validate_wordlist_file,
 )
@@ -274,6 +276,14 @@ class DiscoveryApp(tk.Tk):
             self.preflight_var.set("Preflight unavailable: invalid or missing domain list file.")
             return
 
+        loaded = load_domain_inputs(domain_path)
+        if loaded.error:
+            self.preflight_var.set(f"Preflight unavailable: {loaded.error}")
+            return
+        if not loaded.domains:
+            self.preflight_var.set("Preflight unavailable: no domains found in input file.")
+            return
+
         wordlist_path_str = self.wordlist_file_var.get().strip()
         wordlist_path = Path(wordlist_path_str) if wordlist_path_str else None
         if wordlist_path:
@@ -288,9 +298,22 @@ class DiscoveryApp(tk.Tk):
             return
 
         sources = ", ".join(summary.wordlist_sources.keys()) if summary.wordlist_sources else "(none)"
+        metadata_line = ""
+        if summary.metadata_columns_detected:
+            metadata_line = (
+                f"  Metadata columns: {', '.join(summary.metadata_columns_detected)}\n"
+            )
+        duplicate_line = ""
+        if summary.duplicate_domains_removed:
+            duplicate_line = (
+                f"  Duplicate domains removed: {summary.duplicate_domains_removed}\n"
+            )
         self.preflight_var.set(
             "Preflight estimate (discovery-based; not a complete inventory):\n"
             f"  Domains loaded: {summary.domain_count}\n"
+            f"  Input type: {summary.input_file_type}\n"
+            f"{metadata_line}"
+            f"{duplicate_line}"
             f"  Wordlist sources: {sources}\n"
             f"  Total unique candidate labels: {summary.total_unique_labels}\n"
             f"  Estimated candidate names per domain: {summary.estimated_candidates_per_domain}\n"
@@ -352,7 +375,7 @@ class DiscoveryApp(tk.Tk):
             return False, None, None
 
         domain_path = Path(domain_path_str)
-        ok, message = validate_domain_file(domain_path)
+        ok, message = validate_domain_input(domain_path)
         self._log(message)
         if not ok:
             messagebox.showerror("Invalid domain file", message)

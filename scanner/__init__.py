@@ -2,6 +2,7 @@
 
 from scanner.export_service import (
     CSV_COLUMNS,
+    CONTEXT_LIMITATION,
     DISCOVERY_LIMITATION,
     SUMMARY_COLUMNS,
     ExportOutcome,
@@ -12,9 +13,12 @@ from scanner.export_service import (
     export_results,
     export_xlsx_report,
 )
+from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.models import (
     CancellationToken,
     DiscoveredRecord,
+    DomainInputRecord,
+    DomainLoadInfo,
     DomainScanResult,
     FindingClassification,
     PreflightSummary,
@@ -34,15 +38,19 @@ from scanner.scan_engine import (
     compute_warning_level,
     run_scan,
     validate_domain_file,
+    validate_domain_input,
     validate_wordlist_file,
 )
 
 __all__ = [
     "CSV_COLUMNS",
+    "CONTEXT_LIMITATION",
     "DISCOVERY_LIMITATION",
     "SUMMARY_COLUMNS",
     "CancellationToken",
     "DiscoveredRecord",
+    "DomainInputRecord",
+    "DomainLoadInfo",
     "DomainScanResult",
     "ExportOutcome",
     "FindingClassification",
@@ -67,7 +75,10 @@ __all__ = [
     "get_app_base_dir",
     "get_output_dir",
     "get_wordlists_dir",
+    "load_domain_inputs",
+    "load_domains",
     "run_scan",
     "validate_domain_file",
+    "validate_domain_input",
     "validate_wordlist_file",
 ]

@@ -71,6 +71,37 @@ class PreflightSummary:
     axfr_enabled: bool
     auth_ns_enabled: bool
     warning_level: str
+    input_file_type: str = "txt"
+    metadata_columns_detected: list[str] = field(default_factory=list)
+    duplicate_domains_removed: int = 0
+
+
+@dataclass
+class DomainInputRecord:
+    """One domain from an input file, with optional spreadsheet metadata."""
+
+    domain: str
+    original_domain: str
+    source_row_number: int | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    second_level_domain: str = ""
+    zone: str = ""
+    delegated_manager: str = ""
+    known_fourth_level_domains: list[str] = field(default_factory=list)
+    known_fifth_level_domains: list[str] = field(default_factory=list)
+    fourth_level_count: str = ""
+    fifth_level_count: str = ""
+
+
+@dataclass
+class DomainLoadInfo:
+    """Metadata about how the domain input file was parsed."""
+
+    input_file_type: str = "txt"
+    metadata_columns_detected: list[str] = field(default_factory=list)
+    domains_loaded: int = 0
+    duplicate_domains_removed: int = 0
+    input_metadata_preserved: bool = False
 
 
 class RecordType(str, Enum):
@@ -165,6 +196,7 @@ class DomainScanResult:
     wildcard_suspected: bool = False
     candidates_tested: int = 0
     scan_failed: bool = False
+    input_record: DomainInputRecord | None = None
 
 
 @dataclass
@@ -184,3 +216,5 @@ class ScanRunResult:
     elapsed_seconds: Optional[float] = None
     domains_total: int = 0
     domains_planned: list[str] = field(default_factory=list)
+    domain_inputs: list[DomainInputRecord] = field(default_factory=list)
+    input_load_info: DomainLoadInfo | None = None

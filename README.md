@@ -26,6 +26,7 @@ What works today:
 
 - Tkinter desktop GUI with threaded scan execution (GUI stays responsive)
 - Domain list file picker (`.txt` / `.csv`) with normalization and `#` comment support
+- **Enriched CSV input** with spreadsheet metadata (delegated manager, zone, known 4th/5th-level domains) carried into XLSX Summary
 - **Wordlist Sources** checkboxes for transparent control over candidate label groups
 - Optional custom wordlist file with an explicit include checkbox
 - Scan options for authoritative NS queries and AXFR attempts
@@ -96,6 +97,30 @@ python app.py
 ```
 
 Requires `dnspython` and `openpyxl` (see `requirements.txt`).
+
+## Domain input files
+
+The tool accepts three input shapes:
+
+| Input type | Format | Notes |
+|------------|--------|-------|
+| **TXT** | One domain per line | `#` comments supported |
+| **Simple CSV** | One domain per row (first column) | No header row required |
+| **Enriched CSV** | Header row with domain + metadata columns | Metadata is preserved in XLSX Summary |
+
+**Enriched CSV domain column** — detected automatically from headers such as `third_level_domain`, `domain`, `domain_name`, `Domain Name`, or `Third Level Domain` (case/spacing/underscore insensitive).
+
+**Recognized metadata columns** (preserved when present):
+
+- `second_level_domain`
+- `zone`
+- `companyname` / `delegated_manager` (exported as `delegated_manager`)
+- `fourth_level_domains` / `fifth_level_domains` (semicolon-separated lists)
+- `fourth_level_count` / `fifth_level_count`
+
+Duplicate domains are deduplicated; first-seen metadata is kept. Blank rows are ignored. If an enriched CSV has no recognizable domain column, validation fails with a clear error.
+
+Use enriched CSV when scanning a sample from a larger spreadsheet so the workbook can explain **why each domain matters** (delegated manager, zone, known child domains) alongside DNS findings.
 
 ## Windows EXE packaging
 
@@ -176,9 +201,9 @@ Reports are written to the [output folder for your mode](#where-reports-are-save
 
 | Sheet | Purpose |
 |-------|---------|
-| **Summary** | **Start here.** One row per base domain with `scan_status`, evidence summary, nameserver/AXFR/wildcard flags, and counts. Use this sheet to triage which domains need follow-up. |
+| **Summary** | **Start here.** One row per base domain with input metadata (`input_domain`, `delegated_manager`, `zone`, known 4th/5th-level fields), `scan_status`, DNS evidence counts, `evidence_summary`, and `analysis_note` connecting input context to findings. |
 | **Findings** | Detailed rows for each discovered record, candidate test, or notable outcome (same columns as findings CSV). Use after Summary to inspect individual DNS evidence. |
-| **Scan Settings** | Scan metadata, wordlist sources, DNS timeouts, completion/cancellation flags, and the discovery limitation note. |
+| **Scan Settings** | Scan metadata, input file type (`txt` / `simple_csv` / `enriched_csv`), detected metadata columns, wordlist sources, DNS timeouts, completion/cancellation flags, and limitation notes. |
 | **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
 
 Summary `scan_status` values use discovery-based wording such as *Possible delegated child zone discovered*, *DNS activity discovered*, *DNS activity discovered with scan errors*, *Base domain zone exists*, *Base domain records only*, *Scan incomplete / error*, *Scan errors only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.

@@ -16,6 +16,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from scanner.models import (
     DiscoveredRecord,
+    DomainInputRecord,
     DomainScanResult,
     FindingClassification,
     ScanRunResult,
@@ -38,6 +39,12 @@ OPERATOR_NOTE = (
 DISCOVERY_LIMITATION = (
     "DNS discovery results show only records found through the tested methods. "
     "No records discovered does not prove that no subdelegations or DNS records exist."
+)
+
+CONTEXT_LIMITATION = (
+    "Results are based on selected input domains, selected wordlists, and tested DNS methods. "
+    "Findings support that DNS activity can exist inside externally managed zones, "
+    "but they do not provide a complete zone inventory."
 )
 
 PARTIAL_SCAN_NOTE = (
@@ -71,6 +78,14 @@ CSV_COLUMNS = [
 SUMMARY_COLUMNS = [
     "scan_timestamp",
     "base_domain",
+    "input_domain",
+    "delegated_manager",
+    "zone",
+    "second_level_domain",
+    "known_fourth_level_count",
+    "known_fifth_level_count",
+    "known_fourth_level_domains",
+    "known_fifth_level_domains",
     "scan_status",
     "authoritative_nameservers",
     "axfr_status",
@@ -83,12 +98,15 @@ SUMMARY_COLUMNS = [
     "candidate_names_tested",
     "wordlist_sources",
     "evidence_summary",
+    "analysis_note",
     "limitation_note",
 ]
 
 ERRORS_WARNINGS_COLUMNS = [
     "scan_timestamp",
     "base_domain",
+    "delegated_manager",
+    "zone",
     "warning_type",
     "tested_name",
     "record_type",
@@ -154,13 +172,81 @@ def _workbook_report_stem(scan_timestamp: datetime | None) -> str:
 
 
 def _export_notes(result: ScanRunResult) -> str:
+    parts = [DISCOVERY_LIMITATION, CONTEXT_LIMITATION]
     if result.partial or result.cancelled:
-        return f"{DISCOVERY_LIMITATION} {PARTIAL_SCAN_NOTE}"
-    return DISCOVERY_LIMITATION
+        parts.append(PARTIAL_SCAN_NOTE)
+    return " ".join(parts)
 
 
 def _limitation_note(result: ScanRunResult) -> str:
     return _export_notes(result)
+
+
+def _input_metadata_values(domain_result: DomainScanResult) -> dict[str, str]:
+    record = domain_result.input_record
+    if record is None:
+        return {
+            "input_domain": "",
+            "delegated_manager": "",
+            "zone": "",
+            "second_level_domain": "",
+            "known_fourth_level_count": "",
+            "known_fifth_level_count": "",
+            "known_fourth_level_domains": "",
+            "known_fifth_level_domains": "",
+        }
+
+    return {
+        "input_domain": record.original_domain,
+        "delegated_manager": record.delegated_manager,
+        "zone": record.zone,
+        "second_level_domain": record.second_level_domain,
+        "known_fourth_level_count": record.fourth_level_count,
+        "known_fifth_level_count": record.fifth_level_count,
+        "known_fourth_level_domains": "; ".join(record.known_fourth_level_domains),
+        "known_fifth_level_domains": "; ".join(record.known_fifth_level_domains),
+    }
+
+
+def _has_known_child_domains(input_record: DomainInputRecord | None) -> bool:
+    if input_record is None:
+        return False
+    if input_record.known_fourth_level_domains or input_record.known_fifth_level_domains:
+        return True
+    for count_value in (input_record.fourth_level_count, input_record.fifth_level_count):
+        if count_value and count_value.strip() not in {"", "0"}:
+            return True
+    return False
+
+
+def _analysis_note(
+    domain_result: DomainScanResult,
+    counts: dict[str, int],
+    scan_status: str,
+) -> str:
+    if _domain_has_scan_error(domain_result):
+        return "Scan incomplete/error; rerun before drawing conclusions."
+
+    has_known_children = _has_known_child_domains(domain_result.input_record)
+    has_live_dns = (
+        counts["dns_names_with_records"] > 0
+        or counts["delegated_child_zones"] > 0
+        or counts["base_zone_exists_flag"] > 0
+        or counts["axfr_success"] > 0
+    )
+
+    if has_known_children:
+        if has_live_dns:
+            return "Input lists known child domains; live DNS activity was also discovered."
+        return "Input lists known child domains, but no live DNS activity was discovered in this scan."
+
+    if has_live_dns:
+        return "Input lists no known child domains; live DNS activity was discovered through tested methods."
+
+    if scan_status == SCAN_STATUS_NO_RECORDS:
+        return "No records discovered using tested methods; this does not prove absence."
+
+    return "No records discovered using tested methods; this does not prove absence."
 
 
 def _wordlist_sources_text(result: ScanRunResult) -> str:
@@ -608,11 +694,14 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
 
     for domain_result in result.domain_results:
         counts = _domain_summary_counts(domain_result)
+        metadata = _input_metadata_values(domain_result)
+        scan_status = _determine_scan_status(domain_result, counts)
         rows.append(
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": domain_result.domain,
-                "scan_status": _determine_scan_status(domain_result, counts),
+                **metadata,
+                "scan_status": scan_status,
                 "authoritative_nameservers": "; ".join(_authoritative_nameservers(domain_result)),
                 "axfr_status": _domain_axfr_status(domain_result, axfr_enabled),
                 "wildcard_suspected": "true" if domain_result.wildcard_suspected else "false",
@@ -624,6 +713,7 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "candidate_names_tested": str(counts["candidates_tested"]),
                 "wordlist_sources": wordlist_sources,
                 "evidence_summary": _evidence_summary(domain_result, counts),
+                "analysis_note": _analysis_note(domain_result, counts, scan_status),
                 "limitation_note": _limitation_note(result),
             }
         )
@@ -637,9 +727,18 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
     options = result.input.options
     label_counts = plan.source_counts if plan else {}
 
+    load_info = result.input_load_info
     rows: list[tuple[str, str]] = [
         ("app_name", APP_NAME),
         ("scan_timestamp", _format_timestamp(result.scan_timestamp)),
+        ("input_file_type", load_info.input_file_type if load_info else ""),
+        ("metadata_columns_detected", ", ".join(load_info.metadata_columns_detected) if load_info else ""),
+        ("domains_loaded", str(load_info.domains_loaded if load_info else len(result.domain_inputs))),
+        ("duplicate_domains_removed", str(load_info.duplicate_domains_removed if load_info else 0)),
+        (
+            "input_metadata_preserved",
+            str(load_info.input_metadata_preserved).lower() if load_info else "false",
+        ),
         ("domains_scanned", str(len(result.domain_results))),
         ("domains_planned", str(result.domains_total or len(result.domains_planned))),
         ("scan_completed", str(result.scan_status == ScanStatus.COMPLETED).lower()),
@@ -656,10 +755,21 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("dns_timeout", str(DNS_TIMEOUT)),
         ("dns_lifetime", str(DNS_LIFETIME)),
         ("discovery_limitation", DISCOVERY_LIMITATION),
+        ("context_limitation", CONTEXT_LIMITATION),
         ("partial_scan_note", PARTIAL_SCAN_NOTE if result.partial or result.cancelled else ""),
         ("operator_note", OPERATOR_NOTE),
     ]
     return rows
+
+
+def _warning_context(domain_result: DomainScanResult | None) -> dict[str, str]:
+    if domain_result is None:
+        return {"delegated_manager": "", "zone": ""}
+    meta = _input_metadata_values(domain_result)
+    return {
+        "delegated_manager": meta["delegated_manager"],
+        "zone": meta["zone"],
+    }
 
 
 def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
@@ -674,6 +784,8 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": "",
+                "delegated_manager": "",
+                "zone": "",
                 "warning_type": "scan_cancelled",
                 "tested_name": "",
                 "record_type": "",
@@ -688,6 +800,8 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": "",
+                "delegated_manager": "",
+                "zone": "",
                 "warning_type": "large_candidate_count",
                 "tested_name": "",
                 "record_type": "",
@@ -704,6 +818,8 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": "",
+                "delegated_manager": "",
+                "zone": "",
                 "warning_type": "large_candidate_count",
                 "tested_name": "",
                 "record_type": "",
@@ -717,11 +833,13 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
         )
 
     for domain_result in result.domain_results:
+        context = _warning_context(domain_result)
         if domain_result.wildcard_suspected:
             rows.append(
                 {
                     "scan_timestamp": scan_timestamp,
                     "base_domain": domain_result.domain,
+                    **context,
                     "warning_type": "wildcard_suspected",
                     "tested_name": domain_result.domain,
                     "record_type": "",
@@ -746,6 +864,7 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     {
                         "scan_timestamp": scan_timestamp,
                         "base_domain": domain_result.domain,
+                        **context,
                         "warning_type": warning_type,
                         "tested_name": domain_result.domain,
                         "record_type": "AXFR",
@@ -760,6 +879,7 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     {
                         "scan_timestamp": scan_timestamp,
                         "base_domain": domain_result.domain,
+                        **context,
                         "warning_type": "query_error",
                         "tested_name": record.fqdn,
                         "record_type": _record_type_text(record),
@@ -774,6 +894,7 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     {
                         "scan_timestamp": scan_timestamp,
                         "base_domain": domain_result.domain,
+                        **context,
                         "warning_type": "scan_error",
                         "tested_name": record.fqdn,
                         "record_type": "",
@@ -795,6 +916,7 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     {
                         "scan_timestamp": scan_timestamp,
                         "base_domain": domain_result.domain,
+                        **context,
                         "warning_type": "scan_error",
                         "tested_name": domain_result.domain,
                         "record_type": "",
@@ -860,8 +982,15 @@ def build_json_document(result: ScanRunResult) -> dict:
         "partial_results": result.partial,
         "elapsed_seconds": result.elapsed_seconds,
         "discovery_limitation": DISCOVERY_LIMITATION,
+        "context_limitation": CONTEXT_LIMITATION,
         "partial_scan_note": PARTIAL_SCAN_NOTE if result.partial or result.cancelled else "",
     }
+    if result.input_load_info:
+        metadata["input_file_type"] = result.input_load_info.input_file_type
+        metadata["metadata_columns_detected"] = result.input_load_info.metadata_columns_detected
+        metadata["domains_loaded"] = result.input_load_info.domains_loaded
+        metadata["duplicate_domains_removed"] = result.input_load_info.duplicate_domains_removed
+        metadata["input_metadata_preserved"] = result.input_load_info.input_metadata_preserved
 
     domains: list[dict] = []
     axfr_enabled = result.input.options.attempt_axfr
@@ -901,6 +1030,9 @@ def build_json_document(result: ScanRunResult) -> dict:
         domains.append(
             {
                 "base_domain": domain_result.domain,
+                "input_domain": domain_result.input_record.original_domain if domain_result.input_record else None,
+                "delegated_manager": _input_metadata_values(domain_result)["delegated_manager"] or None,
+                "zone": _input_metadata_values(domain_result)["zone"] or None,
                 "wildcard_suspected": domain_result.wildcard_suspected,
                 "scan_failed": domain_result.scan_failed,
                 "authoritative_nameservers": _authoritative_nameservers(domain_result),
@@ -982,7 +1114,15 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         summary_sheet,
         SUMMARY_COLUMNS,
         summary_rows,
-        wrap_columns={"evidence_summary", "limitation_note", "authoritative_nameservers", "wordlist_sources"},
+        wrap_columns={
+            "evidence_summary",
+            "analysis_note",
+            "limitation_note",
+            "authoritative_nameservers",
+            "wordlist_sources",
+            "known_fourth_level_domains",
+            "known_fifth_level_domains",
+        },
         status_column="scan_status",
         status_fill_map=SUMMARY_STATUS_FILLS,
     )

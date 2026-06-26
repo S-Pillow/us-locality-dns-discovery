@@ -18,9 +18,12 @@ import dns.rdatatype
 import dns.resolver
 import dns.zone
 
+from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.models import (
     CancellationToken,
     DiscoveredRecord,
+    DomainInputRecord,
+    DomainLoadInfo,
     DomainScanResult,
     FindingClassification,
     PreflightSummary,
@@ -127,6 +130,24 @@ def _query_name(name: str) -> str:
     return name.strip().lower().rstrip(".")
 
 
+def validate_domain_input(path: Path) -> tuple[bool, str]:
+    """Validate domain input file content and detect input type."""
+    ok, message = validate_domain_file(path)
+    if not ok:
+        return ok, message
+
+    loaded = load_domain_inputs(path)
+    if loaded.error:
+        return False, loaded.error
+    if not loaded.domains:
+        return False, "No domains found in input file after normalization."
+
+    details = f" ({loaded.input_file_type}, {loaded.domains_loaded} domain(s))"
+    if loaded.duplicate_domains_removed:
+        details += f", {loaded.duplicate_domains_removed} duplicate(s) removed"
+    return True, f"{message}{details}"
+
+
 def _parse_label_rows(path: Path) -> list[str]:
     labels: list[str] = []
     if path.suffix.lower() == ".csv":
@@ -144,19 +165,6 @@ def _parse_label_rows(path: Path) -> list[str]:
             if cell and not cell.startswith("#"):
                 labels.append(cell)
     return labels
-
-
-def load_domains(path: Path) -> list[str]:
-    """Load and normalize domains from a .txt or .csv file."""
-    raw = _parse_label_rows(path)
-    seen: set[str] = set()
-    domains: list[str] = []
-    for item in raw:
-        normalized = _display_name(item)
-        if normalized and normalized not in seen:
-            seen.add(normalized)
-            domains.append(normalized)
-    return domains
 
 
 def _dedupe_labels(labels: list[str]) -> list[str]:
@@ -216,17 +224,16 @@ def compute_warning_level(total_candidates: int) -> str:
 
 def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
     """Build pre-scan estimate from the current input file and options."""
-    try:
-        domains = load_domains(scan_input.domain_file_path)
-    except OSError:
+    loaded = load_domain_inputs(scan_input.domain_file_path)
+    if loaded.error or not loaded.domains:
         return None
 
     plan = build_wordlist_plan(scan_input.options, scan_input.wordlists_dir)
     per_domain = plan.estimated_candidates_per_domain
-    total = len(domains) * per_domain
+    total = len(loaded.domains) * per_domain
 
     return PreflightSummary(
-        domain_count=len(domains),
+        domain_count=len(loaded.domains),
         wordlist_sources=plan.source_counts,
         total_unique_labels=plan.total_unique_labels,
         estimated_candidates_per_domain=per_domain,
@@ -234,6 +241,9 @@ def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
         axfr_enabled=scan_input.options.attempt_axfr,
         auth_ns_enabled=scan_input.options.query_authoritative_ns,
         warning_level=compute_warning_level(total),
+        input_file_type=loaded.input_file_type,
+        metadata_columns_detected=loaded.metadata_columns_detected,
+        duplicate_domains_removed=loaded.duplicate_domains_removed,
     )
 
 
@@ -1147,20 +1157,52 @@ def run_scan(
     log_wordlist_plan(plan, scan_input.options, progress_callback, messages)
 
     try:
-        domains = load_domains(scan_input.domain_file_path)
+        loaded = load_domain_inputs(scan_input.domain_file_path)
     except OSError as exc:
         _emit(f"Failed to read domain file: {exc}", progress_callback, messages)
         return result
 
-    if not domains:
+    if loaded.error:
+        _emit(f"Failed to load domain file: {loaded.error}", progress_callback, messages)
+        return result
+
+    if not loaded.domains:
         _emit("No domains found in input file after normalization.", progress_callback, messages)
         return result
 
-    _emit(f"Loaded {len(domains)} domain(s): {', '.join(domains)}", progress_callback, messages)
-    result.domains_total = len(domains)
-    result.domains_planned = domains
+    result.domain_inputs = loaded.domains
+    result.input_load_info = DomainLoadInfo(
+        input_file_type=loaded.input_file_type,
+        metadata_columns_detected=loaded.metadata_columns_detected,
+        domains_loaded=loaded.domains_loaded,
+        duplicate_domains_removed=loaded.duplicate_domains_removed,
+        input_metadata_preserved=loaded.input_metadata_preserved,
+    )
 
-    for index, domain in enumerate(domains, start=1):
+    domain_names = [record.domain for record in loaded.domains]
+    _emit(
+        f"Loaded {len(domain_names)} domain(s) from {loaded.input_file_type} input: {', '.join(domain_names)}",
+        progress_callback,
+        messages,
+    )
+    if loaded.metadata_columns_detected:
+        _emit(
+            f"  Input metadata columns: {', '.join(loaded.metadata_columns_detected)}",
+            progress_callback,
+            messages,
+        )
+    if loaded.duplicate_domains_removed:
+        _emit(
+            f"  Duplicate domains removed: {loaded.duplicate_domains_removed}",
+            progress_callback,
+            messages,
+        )
+
+    result.domains_total = len(domain_names)
+    result.domains_planned = domain_names
+
+    for index, input_record in enumerate(loaded.domains, start=1):
+        domain = input_record.domain
         if cancel_check and cancel_check():
             _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
             break
@@ -1175,24 +1217,25 @@ def run_scan(
                 cancel_check=cancel_check,
                 progress_update=progress_update,
                 domain_index=index,
-                domain_total=len(domains),
+                domain_total=len(domain_names),
                 domains_completed=len(result.domain_results),
                 started_at=started_at,
             )
             if domain_result is None:
                 _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
                 break
+            domain_result.input_record = input_record
             result.domain_results.append(domain_result)
             _emit_progress(
                 progress_update,
                 domain_index=index,
-                domain_total=len(domains),
+                domain_total=len(domain_names),
                 current_domain=domain,
                 candidates_tested=domain_result.candidates_tested,
                 candidates_total=domain_result.candidates_tested,
                 domains_completed=len(result.domain_results),
                 started_at=started_at,
-                message=f"Completed domain {len(result.domain_results)} of {len(domains)}: {domain}",
+                message=f"Completed domain {len(result.domain_results)} of {len(domain_names)}: {domain}",
             )
             if cancel_check and cancel_check():
                 _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
@@ -1203,6 +1246,7 @@ def run_scan(
             result.domain_results.append(
                 DomainScanResult(
                     domain=domain,
+                    input_record=input_record,
                     scan_failed=True,
                     notes=[error_message],
                     records=[
@@ -1223,7 +1267,7 @@ def run_scan(
 
     cancelled = bool(cancel_check and cancel_check())
     result.cancelled = cancelled
-    result.partial = cancelled and len(result.domain_results) < len(domains)
+    result.partial = cancelled and len(result.domain_results) < len(domain_names)
     result.scan_status = ScanStatus.CANCELLED if cancelled else ScanStatus.COMPLETED
 
     total_records = sum(len(item.records) for item in result.domain_results)
@@ -1237,7 +1281,7 @@ def run_scan(
         _emit("=== Scan complete ===", progress_callback, messages)
 
     _emit(
-        f"Domains scanned: {len(result.domain_results)} of {len(domains)}; "
+        f"Domains scanned: {len(result.domain_results)} of {len(domain_names)}; "
         f"total findings: {total_records}; "
         f"candidates tested: {total_candidates}; "
         f"elapsed: {result.elapsed_seconds:.1f}s",
