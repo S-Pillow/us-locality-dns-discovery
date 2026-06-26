@@ -1,22 +1,24 @@
 # .US Locality DNS Discovery Tool
 
-Internal-use **standalone Windows desktop utility** (Python 3.11+) for discovering visible DNS activity and possible 4th/5th-level subdelegations under externally managed `.us` locality 3rd-level domains.
+Internal-use **standalone Windows desktop utility** (Python 3.11+) for **unknown child domain discovery** under known 3rd-level `.us` domains from your system.
 
-**What this tool does:** runs controlled DNS lookups against a list of 3rd-level domains and selected candidate labels, then exports discovery evidence for human review.
+**Plain-language goal:** use this tool to scan known 3rd-level `.us` domains from our system and look for **child DNS names beneath them that are not already known in the system**.
 
-**What this tool cannot prove:** absence of discovered records is **not** proof that no subdelegations or DNS records exist. The tool does not perform complete zone enumeration, passive DNS, OSINT, or web scraping.
+**What this tool does:** compares known child domains from your input against child DNS names found by live DNS testing, then exports a workbook for human review.
+
+**What this tool cannot prove:** absence of discovered child names is **not** proof that no child domains exist. The tool does not perform complete zone enumeration, passive DNS, OSINT, or web scraping. A few good new examples may be enough for the business question.
 
 ## Operator quick-start
 
 1. Open `USLocalityDNSDiscovery.exe` (or run `python app.py` from source).
-2. Select a `.txt` or `.csv` file containing 3rd-level domains (one per line; `#` comments allowed).
-3. Choose **Wordlist Sources** for the batch size you are running (see [Recommended batch sizes](#recommended-batch-sizes)).
-4. Review the **Preflight Summary** (domains, sources, estimated candidates, warning level).
-5. Click **Run Scan**.
-6. Wait for completion, or click **Cancel Scan** if you need to stop early (partial results may still be exported).
-7. Click **Export Results**.
-8. Choose **XLSX workbook (recommended)** for coworker review.
-9. Open the workbook and review the **Summary** sheet first, then **Findings** for detail.
+2. Select a `.txt` or `.csv` file with known 3rd-level domains (prefer enriched CSV with `domain`, `known_fourth_level_domains`, etc.).
+3. Choose **Light Evidence** for a first 10–25 domain sample (default).
+4. Review **Preflight Summary** (selected domain column, first domains, profile, candidate estimate).
+5. Click **Run Scan** and watch the **phase/progress** text.
+6. Click **Export Results** → **XLSX workbook (recommended)**.
+7. Open **Evidence Review** first (sorted strong → moderate → limited → validation_only → context_only → inconclusive → none).
+8. Review `new_child_domains_found`, `evidence_value`, and `manual_verification_hint`.
+9. Manually verify a few strong/moderate rows before conclusions.
 
 ## Current status (working prototype)
 
@@ -24,20 +26,44 @@ This version includes a **functional DNS discovery scan engine** with **tiered w
 
 What works today:
 
-- Tkinter desktop GUI with threaded scan execution (GUI stays responsive)
-- Domain list file picker (`.txt` / `.csv`) with normalization and `#` comment support
-- **Enriched CSV input** with spreadsheet metadata (delegated manager, zone, known 4th/5th-level domains) carried into XLSX Summary
-- **Wordlist Sources** checkboxes for transparent control over candidate label groups
+- **Child domain discovery focus** — compares known system domains vs live DNS-discovered child names
+- **Scan profiles** — Light Evidence (fast 10–25 domain sample), Normal Evidence, Deep Targeted
+- **Evidence model** — `known_domain`, `name_type`, `evidence_value`, `new_child_domains_found`
+- Tkinter desktop GUI with threaded scan execution, phase/progress display, and scrollable layout
+- Domain list file picker (`.txt` / `.csv`) with duplicate-header detection and FQDN validation
+- **Enriched CSV input** with `domain`, `known_fourth_level_domains`, `known_fifth_level_domains`, and metadata
+- Targeted 5th-level probing under known 4th-level domains from input (bounded)
 - Optional custom wordlist file with an explicit include checkbox
 - Scan options for authoritative NS queries and AXFR attempts
-- Pre-scan logging of selected sources, label counts, and estimated candidate names
-- Candidate-count warnings when estimates exceed 250 or 500 names per domain
-- Real DNS discovery for base domains and generated candidate subdomains
-- Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
-- **Export Results** to timestamped **XLSX workbook** (recommended), findings CSV, summary CSV, and JSON in `output/` after a completed scan
-- **Preflight summary** with domain/candidate estimates and warning level before scanning
-- **Progress bar and live progress text** during scans
+- Configurable **Output Folder** for all export formats
+- **Export Results** to XLSX (Evidence Review first), CSV, JSON
 - **Cancel Scan** with safe checkpoint cancellation and partial-result export
+
+## Evidence model (workbook)
+
+| Field | Meaning |
+|-------|---------|
+| `known_domain` | `yes` / `no` — was this discovered name already listed in the input known-child fields? |
+| `name_type` | `delegated_child_zone`, `organizational_child_name`, `service_hostname`, `generic_hostname`, `technical_vendor_hostname`, etc. |
+| `evidence_value` | `strong`, `moderate`, `limited`, `validation_only`, `context_only`, `none`, `inconclusive` |
+| `new_child_domains_found` | Child DNS names found in live DNS that were **not** already known in the system input |
+| `known_domains_validated` | Known child domains from input that were confirmed in live DNS |
+
+**How to read names:**
+
+- `www`, `mail`, `autodiscover`, `smtp`, `msoid`, `lyncdiscover` are valid DNS child names but usually **limited** evidence value.
+- `police`, `portal`, `library`, `court`, `fire`, etc. are more meaningful organizational examples (**moderate** when new).
+- NS/SOA delegated child zones not already known in the system are **strong** evidence.
+
+## Scan profiles
+
+| Profile | Purpose | Typical batch |
+|---------|---------|---------------|
+| **Light Evidence** | Fast first pass; ~25 high-value labels; AXFR off | 10–25 domains |
+| **Normal Evidence** | RFC + Common + Civic wordlists; AXFR optional | 3–10 domains |
+| **Deep Targeted** | Broader wordlist controls enabled | 1–3 domains |
+
+Light Evidence is the recommended first run for a pilot sample. Do not run all ~2,000 domains unless intentionally planned.
 
 ## Wordlist sources
 

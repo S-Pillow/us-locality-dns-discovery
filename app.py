@@ -11,12 +11,14 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from scanner.export_service import export_results
-from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProgressUpdate, ScanRunResult
+from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProfile, ScanProgressUpdate, ScanRunResult
 from scanner.paths import ensure_output_dir, get_default_output_dir, get_wordlists_dir
 from scanner.input_loader import load_domain_inputs
 from scanner.scan_engine import (
+    apply_scan_profile,
     build_preflight_summary,
     preflight_scan_guidance,
+    profile_guidance,
     run_scan,
     validate_domain_input,
     validate_domain_file,
@@ -34,12 +36,13 @@ class DiscoveryApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.minsize(720, 640)
-        self.geometry("920x720")
+        self.minsize(900, 600)
+        self.geometry("960x720")
 
         self.domain_file_var = tk.StringVar()
         self.wordlist_file_var = tk.StringVar()
         self.output_folder_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR.resolve()))
+        self.scan_profile_var = tk.StringVar(value=ScanProfile.LIGHT.value)
 
         self.rfc_locality_var = tk.BooleanVar(value=True)
         self.dns_common_var = tk.BooleanVar(value=True)
@@ -66,12 +69,34 @@ class DiscoveryApp(tk.Tk):
         self._bind_preflight_refresh()
         self._on_wordlist_path_changed()
         self._refresh_preflight()
-        self._log("Ready. Select a domain list and click Run Scan to begin DNS discovery.")
+        self._log("Ready. Select known 3rd-level domains and run a child domain discovery scan.")
         self._log(f"Output folder: {self.output_folder_var.get()}")
 
     def _build_ui(self) -> None:
-        main = ttk.Frame(self, padding=12)
-        main.pack(fill=tk.BOTH, expand=True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(self, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        main = ttk.Frame(canvas, padding=12)
+        canvas_window = canvas.create_window((0, 0), window=main, anchor="nw")
+
+        def _on_frame_configure(_event=None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event) -> None:
+            canvas.itemconfigure(canvas_window, width=event.width)
+
+        main.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         files_frame = ttk.LabelFrame(main, text="Input Files", padding=10)
         files_frame.pack(fill=tk.X, pady=(0, 10))
@@ -103,14 +128,17 @@ class DiscoveryApp(tk.Tk):
             ("Schools / libraries", self.schools_libraries_var),
             ("Delegated-manager clues", self.delegated_manager_var),
         ]
+        self.wordlist_checkbuttons: list[ttk.Checkbutton] = []
         for index, (text, variable) in enumerate(wordlist_rows):
-            ttk.Checkbutton(wordlist_frame, text=text, variable=variable).grid(
+            check = ttk.Checkbutton(wordlist_frame, text=text, variable=variable)
+            check.grid(
                 row=index // 2,
                 column=index % 2,
                 sticky=tk.W,
                 padx=(0, 24),
                 pady=2,
             )
+            self.wordlist_checkbuttons.append(check)
 
         self.custom_wordlist_check = ttk.Checkbutton(
             wordlist_frame,
@@ -119,17 +147,36 @@ class DiscoveryApp(tk.Tk):
         )
         self.custom_wordlist_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
-        options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
+        options_frame = ttk.LabelFrame(main, text="Scan Profile", padding=10)
         options_frame.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Checkbutton(options_frame, text="Attempt AXFR", variable=self.axfr_var).grid(
+        profile_rows = [
+            ("Light Evidence (10–25 domains)", ScanProfile.LIGHT.value),
+            ("Normal Evidence (3–10 domains)", ScanProfile.NORMAL.value),
+            ("Deep Targeted (1–3 domains)", ScanProfile.DEEP.value),
+        ]
+        for index, (label, value) in enumerate(profile_rows):
+            ttk.Radiobutton(
+                options_frame,
+                text=label,
+                variable=self.scan_profile_var,
+                value=value,
+                command=self._on_scan_profile_changed,
+            ).grid(row=0, column=index, sticky=tk.W, padx=(0, 18), pady=2)
+
+        scan_options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
+        scan_options_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Checkbutton(scan_options_frame, text="Attempt AXFR", variable=self.axfr_var).grid(
             row=0, column=0, sticky=tk.W, padx=(0, 24), pady=2
         )
         ttk.Checkbutton(
-            options_frame,
+            scan_options_frame,
             text="Query authoritative nameservers directly",
             variable=self.auth_ns_var,
         ).grid(row=0, column=1, sticky=tk.W, pady=2)
+
+        self.wordlist_frame = wordlist_frame
 
         preflight_frame = ttk.LabelFrame(main, text="Preflight Summary", padding=10)
         preflight_frame.pack(fill=tk.X, pady=(0, 10))
@@ -159,8 +206,8 @@ class DiscoveryApp(tk.Tk):
             wraplength=860,
         ).pack(anchor=tk.W)
 
-        actions_frame = ttk.Frame(main)
-        actions_frame.pack(fill=tk.X, pady=(0, 10))
+        actions_frame = ttk.Frame(self, padding=(12, 8))
+        actions_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         self.run_button = ttk.Button(actions_frame, text="Run Scan", command=self._on_run_scan)
         self.run_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -182,16 +229,18 @@ class DiscoveryApp(tk.Tk):
         self.export_button.pack(side=tk.LEFT)
 
         log_frame = ttk.LabelFrame(main, text="Status / Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
         self.log_text = scrolledtext.ScrolledText(
             log_frame,
             wrap=tk.WORD,
-            height=18,
+            height=12,
             state=tk.DISABLED,
             font=("Consolas", 10),
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        self._on_scan_profile_changed()
 
     def _add_file_row(
         self,
@@ -302,7 +351,35 @@ class DiscoveryApp(tk.Tk):
             self.custom_wordlist_check.configure(state=tk.DISABLED)
         self._refresh_preflight()
 
+    def _on_scan_profile_changed(self) -> None:
+        profile = ScanProfile(self.scan_profile_var.get())
+        deep_mode = profile == ScanProfile.DEEP
+        for check in self.wordlist_checkbuttons:
+            check.configure(state=tk.NORMAL if deep_mode else tk.DISABLED)
+        self.custom_wordlist_check.configure(
+            state=tk.NORMAL if deep_mode and self.wordlist_file_var.get().strip() else tk.DISABLED
+        )
+
+        if profile == ScanProfile.LIGHT:
+            self.axfr_var.set(False)
+            self.auth_ns_var.set(True)
+            self.rfc_locality_var.set(False)
+            self.dns_common_var.set(False)
+            self.civic_departments_var.set(False)
+            self.public_services_var.set(False)
+            self.schools_libraries_var.set(False)
+            self.delegated_manager_var.set(False)
+        elif profile == ScanProfile.NORMAL:
+            self.rfc_locality_var.set(True)
+            self.dns_common_var.set(True)
+            self.civic_departments_var.set(True)
+            self.public_services_var.set(False)
+            self.schools_libraries_var.set(False)
+            self.delegated_manager_var.set(False)
+        self._refresh_preflight()
+
     def _bind_preflight_refresh(self) -> None:
+        self.scan_profile_var.trace_add("write", lambda *_args: self._refresh_preflight())
         for variable in (
             self.rfc_locality_var,
             self.dns_common_var,
@@ -390,12 +467,29 @@ class DiscoveryApp(tk.Tk):
                 f"  Duplicate domains removed: {summary.duplicate_domains_removed}\n"
             )
         size_level, size_guidance = preflight_scan_guidance(summary.estimated_total_candidates)
+        profile = ScanProfile(summary.scan_profile)
+        warning_lines = ""
+        if summary.input_warnings:
+            warning_lines = "\n".join(f"  {warning}" for warning in summary.input_warnings) + "\n"
+        sample_line = ""
+        if summary.sample_domains_preview:
+            sample_line = f"  First domains: {', '.join(summary.sample_domains_preview)}\n"
+        domain_column_line = ""
+        if summary.selected_domain_column:
+            domain_column_line = f"  Selected domain column: {summary.selected_domain_column}\n"
+
         self.preflight_var.set(
-            "Preflight estimate (discovery-based; not a complete inventory):\n"
+            "Preflight estimate — unknown child domain discovery:\n"
+            f"  Goal: find child DNS names not already known in the system input.\n"
+            f"  Scan profile: {profile.value}\n"
+            f"  Profile guidance: {profile_guidance(profile)}\n"
             f"  Domains loaded: {summary.domain_count}\n"
             f"  Input type: {summary.input_file_type}\n"
+            f"{domain_column_line}"
+            f"{sample_line}"
             f"{metadata_line}"
             f"{duplicate_line}"
+            f"{warning_lines}"
             f"{output_line}"
             f"  Wordlist sources: {sources}\n"
             f"  Total unique candidate labels: {summary.total_unique_labels}\n"
@@ -403,8 +497,7 @@ class DiscoveryApp(tk.Tk):
             f"  Estimated total candidate names: {summary.estimated_total_candidates:,}\n"
             f"  Scan size: {size_level}\n"
             f"  Guidance: {size_guidance}\n"
-            f"  Evidence sampling tip: use a small targeted sample (10–25 domains), not the full ~2,000-domain list.\n"
-            f"  Review focus: strong/moderate evidence_support_level rows in the Evidence Review sheet.\n"
+            f"  Review focus: Evidence Review sheet — strong/moderate evidence_value rows.\n"
             f"  AXFR enabled: {'yes' if summary.axfr_enabled else 'no'}\n"
             f"  Authoritative NS querying enabled: {'yes' if summary.auth_ns_enabled else 'no'}"
         )
@@ -429,14 +522,34 @@ class DiscoveryApp(tk.Tk):
         if update.domain_total > 0:
             completed_fraction = update.domains_completed / update.domain_total
             current_domain_fraction = 0.0
-            if update.candidates_total > 0:
-                current_domain_fraction = (update.candidates_tested / update.candidates_total) / update.domain_total
+            if update.candidates_started and update.candidates_total > 0:
+                current_domain_fraction = (
+                    update.candidates_tested / update.candidates_total
+                ) / update.domain_total
             self.progress_var.set(min((completed_fraction + current_domain_fraction) * 100, 100))
 
         elapsed_minutes, elapsed_seconds = divmod(int(update.elapsed_seconds), 60)
+        if update.candidates_started and update.candidates_total > 0:
+            candidate_line = (
+                f"Candidates tested: {update.candidates_tested} / {update.candidates_total}"
+            )
+        elif update.candidates_total > 0:
+            candidate_line = (
+                f"Candidate testing not started yet (estimated {update.candidates_total})"
+            )
+        else:
+            candidate_line = "Candidate testing not started yet"
+
+        phase_line = update.phase or "Working"
+        domain_line = (
+            f"Scanning domain {update.domain_index} of {update.domain_total}: {update.current_domain}"
+            if update.domain_total and update.current_domain
+            else update.message or "Preparing scan"
+        )
         self.progress_text_var.set(
-            f"Scanning domain {update.domain_index} of {update.domain_total}: {update.current_domain}\n"
-            f"Candidates tested for current domain: {update.candidates_tested} / {update.candidates_total}\n"
+            f"Phase: {phase_line}\n"
+            f"{domain_line}\n"
+            f"{candidate_line}\n"
             f"Completed domains: {update.domains_completed} / {update.domain_total}\n"
             f"Elapsed: {elapsed_minutes}m {elapsed_seconds}s"
         )
@@ -481,7 +594,9 @@ class DiscoveryApp(tk.Tk):
 
     def _collect_scan_options(self, wordlist_path: Path | None) -> ScanOptions:
         include_custom = bool(wordlist_path) and self.include_custom_var.get()
+        profile = ScanProfile(self.scan_profile_var.get())
         return ScanOptions(
+            scan_profile=profile,
             include_rfc_locality_baseline=self.rfc_locality_var.get(),
             include_dns_common=self.dns_common_var.get(),
             include_civic_departments=self.civic_departments_var.get(),
@@ -495,13 +610,16 @@ class DiscoveryApp(tk.Tk):
         )
 
     def _log_scan_options(self, options: ScanOptions) -> None:
+        resolved = apply_scan_profile(options)
         self._log("Scan options:")
-        self._log(f"  RFC/locality baseline: {options.include_rfc_locality_baseline}")
-        self._log(f"  Common DNS/web labels: {options.include_dns_common}")
-        self._log(f"  Civic departments: {options.include_civic_departments}")
-        self._log(f"  Public services / portals: {options.include_public_services}")
-        self._log(f"  Schools / libraries: {options.include_schools_libraries}")
-        self._log(f"  Delegated-manager clues: {options.include_delegated_manager_clues}")
+        self._log(f"  Scan profile: {options.scan_profile.value}")
+        self._log(f"  RFC/locality baseline: {resolved.include_rfc_locality_baseline}")
+        self._log(f"  Common DNS/web labels: {resolved.include_dns_common}")
+        self._log(f"  Civic departments: {resolved.include_civic_departments}")
+        self._log(f"  Light Evidence labels: {resolved.include_light_evidence}")
+        self._log(f"  Public services / portals: {resolved.include_public_services}")
+        self._log(f"  Schools / libraries: {resolved.include_schools_libraries}")
+        self._log(f"  Delegated-manager clues: {resolved.include_delegated_manager_clues}")
         if options.custom_wordlist_path and options.include_custom_wordlist:
             self._log(f"  Custom wordlist included: {options.custom_wordlist_path}")
         elif options.custom_wordlist_path:

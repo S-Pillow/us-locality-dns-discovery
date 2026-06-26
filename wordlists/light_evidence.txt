@@ -1,0 +1,26 @@
+# High-value labels for Light Evidence profile (fast pilot scans)
+ci
+co
+www
+mail
+portal
+police
+fire
+library
+clerk
+records
+gis
+tax
+court
+cityhall
+townhall
+parks
+water
+publicworks
+admin
+finance
+autodiscover
+smtp
+msoid
+lyncdiscover
+sip

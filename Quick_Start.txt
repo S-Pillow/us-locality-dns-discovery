@@ -1,37 +1,48 @@
 .US Locality DNS Discovery Tool — Quick Start
 ==============================================
 
+Goal: scan known 3rd-level .US domains from our system and look for child DNS
+names beneath them that are not already known in the system.
+
 1. Run USLocalityDNSDiscovery.exe
    (Copy to a local folder if Windows SmartScreen blocks a network share.)
 
 2. Select input CSV or TXT
-   Use a small enriched CSV sample with third_level_domain and metadata columns.
+   Prefer enriched CSV with columns: domain, known_fourth_level_domains,
+   known_fifth_level_domains, delegated_manager, zone.
 
 3. Choose Output Folder
    Default is output\ beside the EXE. Use Browse to pick another writable folder.
 
-4. Select wordlist sources
-   Built-in wordlists are bundled in the EXE — no separate wordlists folder needed.
-   Optional: browse for a custom wordlist file and check Include custom wordlist.
+4. Select scan profile
+   Start with Light Evidence for a 10–25 domain sample (default).
+   Normal Evidence is for 3–10 domains. Deep Targeted is for 1–3 domains.
 
 5. Review Preflight Summary
-   Confirm domains, metadata columns, output folder, and scan-size guidance.
+   Confirm selected domain column, first 5 domains, profile, output folder,
+   and candidate estimate.
 
 6. Run Scan
-   Progress bar and Cancel Scan stay available during the run.
+   Watch the phase/progress text. Cancel Scan stays available during the run.
 
 7. Export XLSX (recommended)
    CSV, JSON, and All formats also write to the selected Output Folder.
 
 8. Open Evidence Review first
-   Rows are sorted strong → moderate → limited → inconclusive → none.
+   Rows are sorted by evidence_value: strong → moderate → limited → etc.
 
-9. Review strong/moderate rows
-   Use manual_verification_hint dig commands for spot checks.
+9. Review new_child_domains_found and evidence_value
+   - strong: new delegated child zone (NS/SOA)
+   - moderate: new organizational/service child name (police, portal, library…)
+   - limited: new generic/technical hostname (www, mail, autodiscover…)
+   - validation_only: known child confirmed in DNS (not a new discovery)
 
-10. Manually verify selected rows before conclusions.
+10. Use manual_verification_hint dig commands and verify selected rows.
 
-Important: No records discovered does not prove absence of DNS activity or subdelegations.
-The scan does not provide complete zone enumeration.
+Important:
+- www / autodiscover / mail are included as DNS names but usually limited value.
+- No child names discovered does not prove absence.
+- The scan does not find every possible child domain.
+- A few good examples may be enough.
 
-See README.md for batch sizes, performance guidance, and coworker handoff details.
+See README.md for full evidence model, input columns, and handoff details.

@@ -21,6 +21,28 @@ class ScanStatus(str, Enum):
     FAILED = "failed"
 
 
+class ScanProfile(str, Enum):
+    """Operator scan profile controlling candidate breadth and defaults."""
+
+    LIGHT = "light_evidence"
+    NORMAL = "normal_evidence"
+    DEEP = "deep_targeted"
+
+
+class ScanPhase(str, Enum):
+    """Human-readable scan progress phase for the GUI."""
+
+    PREPARING_INPUT = "Preparing input"
+    LOADING_WORDLISTS = "Loading wordlists"
+    DISCOVERING_AUTH_NS = "Discovering authoritative nameservers"
+    CHECKING_BASE = "Checking base SOA/NS"
+    ATTEMPTING_AXFR = "Attempting AXFR"
+    TESTING_FOURTH_LEVEL = "Testing 4th-level candidate names"
+    TESTING_FIFTH_LEVEL = "Testing 5th-level candidate names"
+    COMPLETE = "Complete"
+    CANCELLED = "Cancelled"
+
+
 class CancellationToken:
     """Thread-safe scan cancellation flag."""
 
@@ -52,7 +74,9 @@ class ScanProgressUpdate:
     candidates_total: int
     domains_completed: int
     elapsed_seconds: float
+    phase: str = ""
     message: str = ""
+    candidates_started: bool = False
 
 
 ScanProgressCallback = Callable[[ScanProgressUpdate], None]
@@ -71,9 +95,13 @@ class PreflightSummary:
     axfr_enabled: bool
     auth_ns_enabled: bool
     warning_level: str
+    scan_profile: str = ScanProfile.NORMAL.value
     input_file_type: str = "txt"
     metadata_columns_detected: list[str] = field(default_factory=list)
     duplicate_domains_removed: int = 0
+    selected_domain_column: str = ""
+    sample_domains_preview: list[str] = field(default_factory=list)
+    input_warnings: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,10 +115,13 @@ class DomainInputRecord:
     second_level_domain: str = ""
     zone: str = ""
     delegated_manager: str = ""
+    locality_label: str = ""
     known_fourth_level_domains: list[str] = field(default_factory=list)
     known_fifth_level_domains: list[str] = field(default_factory=list)
     fourth_level_count: str = ""
     fifth_level_count: str = ""
+    sample_reason: str = ""
+    notes: str = ""
 
 
 @dataclass
@@ -102,6 +133,9 @@ class DomainLoadInfo:
     domains_loaded: int = 0
     duplicate_domains_removed: int = 0
     input_metadata_preserved: bool = False
+    selected_domain_column: str = ""
+    sample_domains_preview: list[str] = field(default_factory=list)
+    input_warnings: list[str] = field(default_factory=list)
 
 
 class RecordType(str, Enum):
@@ -137,6 +171,8 @@ class FindingClassification(str, Enum):
 class ScanOptions:
     """User-selected scan configuration."""
 
+    scan_profile: ScanProfile = ScanProfile.LIGHT
+    include_light_evidence: bool = False
     include_rfc_locality_baseline: bool = True
     include_dns_common: bool = True
     include_civic_departments: bool = True
@@ -158,6 +194,7 @@ class WordlistPlan:
     estimated_candidates_per_domain: int = 0
     fifth_level_enabled: bool = False
     fifth_level_prefix_count: int = 0
+    known_fifth_level_candidates: int = 0
     unique_labels: list[str] = field(default_factory=list)
     fifth_level_prefix_labels: list[str] = field(default_factory=list)
 
@@ -195,6 +232,8 @@ class DomainScanResult:
     notes: list[str] = field(default_factory=list)
     wildcard_suspected: bool = False
     candidates_tested: int = 0
+    fourth_level_candidates_tested: int = 0
+    fifth_level_candidates_tested: int = 0
     scan_failed: bool = False
     input_record: DomainInputRecord | None = None
 

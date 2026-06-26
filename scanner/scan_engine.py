@@ -31,6 +31,8 @@ from scanner.models import (
     RecordType,
     ScanInput,
     ScanOptions,
+    ScanPhase,
+    ScanProfile,
     ScanProgressCallback,
     ScanProgressUpdate,
     ScanRunResult,
@@ -73,12 +75,26 @@ SOA_MNAME_INDICATOR_NOTE = "authoritative indicator from SOA"
 
 # option field -> (log display name, wordlist filename)
 WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
+    ("include_light_evidence", "Light Evidence labels", "light_evidence.txt"),
     ("include_rfc_locality_baseline", "RFC/locality baseline", "rfc1480.txt"),
     ("include_dns_common", "Common DNS/web labels", "dns_common.txt"),
     ("include_civic_departments", "Civic departments", "civic_departments.txt"),
     ("include_public_services", "Public services / portals", "public_services.txt"),
     ("include_schools_libraries", "Schools / libraries", "schools_libraries.txt"),
     ("include_delegated_manager_clues", "Delegated-manager clues", "delegated_manager_clues.txt"),
+)
+
+FIFTH_LEVEL_KNOWN_PREFIXES = (
+    "www",
+    "mail",
+    "portal",
+    "police",
+    "fire",
+    "library",
+    "clerk",
+    "records",
+    "gis",
+    "admin",
 )
 
 FIFTH_LEVEL_PREFIX_SOURCES = (
@@ -92,6 +108,65 @@ CANDIDATE_CANCEL_CHECK_INTERVAL = 5
 PARTIAL_SCAN_MESSAGE = (
     "This scan was cancelled before all domains were completed. Results are partial."
 )
+
+
+def apply_scan_profile(options: ScanOptions) -> ScanOptions:
+    """Map operator scan profile to wordlist and DNS option defaults."""
+    if options.scan_profile == ScanProfile.LIGHT:
+        return ScanOptions(
+            scan_profile=options.scan_profile,
+            include_light_evidence=True,
+            include_rfc_locality_baseline=False,
+            include_dns_common=False,
+            include_civic_departments=False,
+            include_public_services=False,
+            include_schools_libraries=False,
+            include_delegated_manager_clues=False,
+            include_custom_wordlist=options.include_custom_wordlist,
+            custom_wordlist_path=options.custom_wordlist_path,
+            attempt_axfr=False,
+            query_authoritative_ns=True,
+        )
+    if options.scan_profile == ScanProfile.NORMAL:
+        return ScanOptions(
+            scan_profile=options.scan_profile,
+            include_light_evidence=False,
+            include_rfc_locality_baseline=True,
+            include_dns_common=True,
+            include_civic_departments=True,
+            include_public_services=False,
+            include_schools_libraries=False,
+            include_delegated_manager_clues=False,
+            include_custom_wordlist=options.include_custom_wordlist,
+            custom_wordlist_path=options.custom_wordlist_path,
+            attempt_axfr=options.attempt_axfr,
+            query_authoritative_ns=options.query_authoritative_ns,
+        )
+    return ScanOptions(
+        scan_profile=options.scan_profile,
+        include_light_evidence=False,
+        include_rfc_locality_baseline=options.include_rfc_locality_baseline,
+        include_dns_common=options.include_dns_common,
+        include_civic_departments=options.include_civic_departments,
+        include_public_services=options.include_public_services,
+        include_schools_libraries=options.include_schools_libraries,
+        include_delegated_manager_clues=options.include_delegated_manager_clues,
+        include_custom_wordlist=options.include_custom_wordlist,
+        custom_wordlist_path=options.custom_wordlist_path,
+        attempt_axfr=options.attempt_axfr,
+        query_authoritative_ns=options.query_authoritative_ns,
+    )
+
+
+def profile_guidance(profile: ScanProfile) -> str:
+    messages = {
+        ScanProfile.LIGHT: (
+            "Light Evidence is preferred for the first 10–25 known 3rd-level domain sample."
+        ),
+        ScanProfile.NORMAL: "Normal Evidence is recommended for 3–10 domains.",
+        ScanProfile.DEEP: "Deep Targeted is for 1–3 domains with broader wordlists.",
+    }
+    return messages.get(profile, "")
 
 
 def validate_domain_file(path: Path) -> tuple[bool, str]:
@@ -171,14 +246,20 @@ def _dedupe_labels(labels: list[str]) -> list[str]:
     return list(dict.fromkeys(label.lower() for label in labels if label))
 
 
-def build_wordlist_plan(options: ScanOptions, wordlists_dir: Path) -> WordlistPlan:
+def build_wordlist_plan(
+    options: ScanOptions,
+    wordlists_dir: Path,
+    *,
+    known_fourth_level_count: int = 0,
+) -> WordlistPlan:
     """Load selected wordlist sources and compute candidate estimates."""
+    resolved = apply_scan_profile(options)
     source_counts: dict[str, int] = {}
     combined: list[str] = []
     fifth_prefix: list[str] = []
 
     for option_field, display_name, filename in WORDLIST_SOURCES:
-        if not getattr(options, option_field):
+        if not getattr(resolved, option_field):
             continue
         path = wordlists_dir / filename
         labels = _parse_label_rows(path) if path.is_file() else []
@@ -187,25 +268,27 @@ def build_wordlist_plan(options: ScanOptions, wordlists_dir: Path) -> WordlistPl
         if option_field in FIFTH_LEVEL_PREFIX_SOURCES:
             fifth_prefix.extend(labels)
 
-    if options.include_custom_wordlist and options.custom_wordlist_path:
-        custom_labels = _parse_label_rows(options.custom_wordlist_path)
+    if resolved.include_custom_wordlist and resolved.custom_wordlist_path:
+        custom_labels = _parse_label_rows(resolved.custom_wordlist_path)
         source_counts["Custom wordlist"] = len(custom_labels)
         combined.extend(custom_labels)
         fifth_prefix.extend(custom_labels)
 
     unique_labels = _dedupe_labels(combined)
     fifth_prefix_labels = _dedupe_labels(fifth_prefix)
-    fifth_level_enabled = options.include_rfc_locality_baseline and bool(fifth_prefix_labels)
+    fifth_level_enabled = resolved.include_rfc_locality_baseline and bool(fifth_prefix_labels)
 
     fourth_level_count = len(unique_labels)
     fifth_level_count = len(fifth_prefix_labels) * len(FIFTH_LEVEL_BRANCHES) if fifth_level_enabled else 0
+    known_fifth = known_fourth_level_count * len(FIFTH_LEVEL_KNOWN_PREFIXES)
 
     return WordlistPlan(
         source_counts=source_counts,
         total_unique_labels=len(unique_labels),
-        estimated_candidates_per_domain=fourth_level_count + fifth_level_count,
+        estimated_candidates_per_domain=fourth_level_count + fifth_level_count + known_fifth,
         fifth_level_enabled=fifth_level_enabled,
         fifth_level_prefix_count=len(fifth_prefix_labels),
+        known_fifth_level_candidates=known_fifth,
         unique_labels=unique_labels,
         fifth_level_prefix_labels=fifth_prefix_labels,
     )
@@ -242,9 +325,16 @@ def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
     if loaded.error or not loaded.domains:
         return None
 
-    plan = build_wordlist_plan(scan_input.options, scan_input.wordlists_dir)
+    known_fourth_total = sum(len(record.known_fourth_level_domains) for record in loaded.domains)
+    avg_known_fourth = known_fourth_total // max(len(loaded.domains), 1)
+    plan = build_wordlist_plan(
+        scan_input.options,
+        scan_input.wordlists_dir,
+        known_fourth_level_count=avg_known_fourth,
+    )
     per_domain = plan.estimated_candidates_per_domain
     total = len(loaded.domains) * per_domain
+    resolved = apply_scan_profile(scan_input.options)
 
     return PreflightSummary(
         domain_count=len(loaded.domains),
@@ -252,12 +342,16 @@ def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
         total_unique_labels=plan.total_unique_labels,
         estimated_candidates_per_domain=per_domain,
         estimated_total_candidates=total,
-        axfr_enabled=scan_input.options.attempt_axfr,
-        auth_ns_enabled=scan_input.options.query_authoritative_ns,
+        axfr_enabled=resolved.attempt_axfr,
+        auth_ns_enabled=resolved.query_authoritative_ns,
         warning_level=compute_warning_level(total),
+        scan_profile=scan_input.options.scan_profile.value,
         input_file_type=loaded.input_file_type,
         metadata_columns_detected=loaded.metadata_columns_detected,
         duplicate_domains_removed=loaded.duplicate_domains_removed,
+        selected_domain_column=loaded.selected_domain_column,
+        sample_domains_preview=loaded.sample_domains_preview,
+        input_warnings=loaded.input_warnings,
     )
 
 
@@ -271,7 +365,9 @@ def _emit_progress(
     candidates_total: int,
     domains_completed: int,
     started_at: datetime,
+    phase: str = "",
     message: str = "",
+    candidates_started: bool = False,
 ) -> None:
     if progress_update is None:
         return
@@ -285,7 +381,9 @@ def _emit_progress(
             candidates_total=candidates_total,
             domains_completed=domains_completed,
             elapsed_seconds=elapsed,
+            phase=phase,
             message=message,
+            candidates_started=candidates_started,
         )
     )
 
@@ -360,20 +458,59 @@ def log_wordlist_plan(
         )
 
 
-def generate_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
-    """Build 4th- and limited 5th-level candidate FQDNs from a wordlist plan."""
+def generate_fourth_level_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
+    """Build 4th-level candidate FQDNs from a wordlist plan."""
+    base = _query_name(base_domain)
+    return list(dict.fromkeys(f"{label}.{base}" for label in plan.unique_labels))
+
+
+def generate_broad_fifth_level_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
+    """Build limited ci/co 5th-level candidates when RFC baseline is enabled."""
+    if not plan.fifth_level_enabled:
+        return []
     base = _query_name(base_domain)
     candidates: list[str] = []
-
-    for label in plan.unique_labels:
-        candidates.append(f"{label}.{base}")
-
-    if plan.fifth_level_enabled:
-        for branch in FIFTH_LEVEL_BRANCHES:
-            for prefix in plan.fifth_level_prefix_labels:
-                candidates.append(f"{prefix}.{branch}.{base}")
-
+    for branch in FIFTH_LEVEL_BRANCHES:
+        for prefix in plan.fifth_level_prefix_labels:
+            candidates.append(f"{prefix}.{branch}.{base}")
     return list(dict.fromkeys(candidates))
+
+
+def generate_known_child_fifth_level_candidates(
+    base_domain: str,
+    input_record: DomainInputRecord | None,
+) -> list[str]:
+    """Targeted 5th-level probes under known 4th-level domains from system input."""
+    if input_record is None:
+        return []
+    base = _query_name(base_domain)
+    candidates: list[str] = []
+    for known_fourth in input_record.known_fourth_level_domains:
+        parent = _query_name(known_fourth)
+        if not parent.endswith(f".{base}"):
+            continue
+        for prefix in FIFTH_LEVEL_KNOWN_PREFIXES:
+            candidates.append(f"{prefix}.{parent}")
+    return list(dict.fromkeys(candidates))
+
+
+def generate_all_candidates(
+    base_domain: str,
+    plan: WordlistPlan,
+    input_record: DomainInputRecord | None = None,
+) -> tuple[list[str], list[str]]:
+    """Return (4th-level candidates, 5th-level candidates) for a base domain."""
+    fourth = generate_fourth_level_candidates(base_domain, plan)
+    fifth = generate_broad_fifth_level_candidates(base_domain, plan)
+    fifth.extend(generate_known_child_fifth_level_candidates(base_domain, input_record))
+    fifth = list(dict.fromkeys(fifth))
+    return fourth, fifth
+
+
+def generate_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
+    """Build all candidate FQDNs (legacy helper)."""
+    fourth, fifth = generate_all_candidates(base_domain, plan)
+    return list(dict.fromkeys(fourth + fifth))
 
 
 def _make_resolver(nameserver: str | None = None) -> dns.resolver.Resolver:
@@ -829,6 +966,118 @@ def _confidence_for(
     return "normal"
 
 
+def _test_candidates(
+    *,
+    candidates: list[str],
+    domain: str,
+    resolver: dns.resolver.Resolver,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    progress: ProgressCallback | None,
+    messages: list[str],
+    cancel_check: Callable[[], bool] | None,
+    progress_update: ScanProgressCallback | None,
+    domain_index: int,
+    domain_total: int,
+    domains_completed: int,
+    started_at: datetime,
+    phase: ScanPhase,
+    candidates_offset: int,
+    candidates_total: int,
+) -> int:
+    """Test a list of candidate names; return count tested."""
+    subdelegation_count = 0
+    candidate_record_count = 0
+    tested = 0
+
+    for candidate_index, candidate in enumerate(candidates, start=1):
+        if cancel_check and cancel_check():
+            result.notes.append(PARTIAL_SCAN_MESSAGE)
+            _emit(
+                "  Scan cancellation requested; stopping candidate testing for this domain.",
+                progress,
+                messages,
+            )
+            break
+
+        overall_index = candidates_offset + candidate_index
+        if candidate_index % CANDIDATE_CANCEL_CHECK_INTERVAL == 0:
+            _emit_progress(
+                progress_update,
+                domain_index=domain_index,
+                domain_total=domain_total,
+                current_domain=domain,
+                candidates_tested=overall_index,
+                candidates_total=candidates_total,
+                domains_completed=domains_completed,
+                started_at=started_at,
+                phase=phase.value,
+                message=(
+                    f"{phase.value}: {overall_index} / {candidates_total} candidates tested"
+                ),
+                candidates_started=True,
+            )
+
+        ns_findings, ns_candidate_errors = _query_records(
+            candidate,
+            (RecordType.NS,),
+            resolver,
+            source_method="generated_candidate",
+            classification=FindingClassification.DELEGATED_CHILD_ZONE,
+            base_domain=domain,
+        )
+        if ns_findings:
+            subdelegation_count += 1
+            for item in ns_findings:
+                item.confidence = _confidence_for(
+                    wildcard_suspected, item.record_type, item.classification
+                )
+                result.records.append(item)
+            _emit(
+                f"    Delegated child zone: {candidate} NS "
+                f"{', '.join(item.value for item in ns_findings)}",
+                progress,
+                messages,
+            )
+
+        other_findings, candidate_errors = _query_records(
+            candidate,
+            CANDIDATE_RECORD_TYPES,
+            resolver,
+            source_method="generated_candidate",
+            classification=FindingClassification.STANDARD_RECORD,
+            base_domain=domain,
+        )
+        for item in other_findings:
+            item.confidence = _confidence_for(
+                wildcard_suspected, item.record_type, item.classification
+            )
+            candidate_record_count += 1
+            result.records.append(item)
+
+        tested = candidate_index
+
+        for error in ns_candidate_errors + candidate_errors:
+            result.records.append(
+                DiscoveredRecord(
+                    fqdn=candidate,
+                    record_type=None,
+                    value=error,
+                    source_method="recursive_resolver",
+                    classification=FindingClassification.QUERY_ERROR,
+                )
+            )
+
+    _emit(
+        f"  {phase.value}: {tested} tested, "
+        f"{subdelegation_count} delegated child zone(s), "
+        f"{candidate_record_count} DNS name(s) with records",
+        progress,
+        messages,
+    )
+    return tested
+
+
 def scan_domain(
     base_domain: str,
     options: ScanOptions,
@@ -836,6 +1085,7 @@ def scan_domain(
     progress: ProgressCallback | None,
     messages: list[str],
     *,
+    input_record: DomainInputRecord | None = None,
     cancel_check: Callable[[], bool] | None = None,
     progress_update: ScanProgressCallback | None = None,
     domain_index: int = 1,
@@ -846,11 +1096,12 @@ def scan_domain(
     """Run discovery for a single base domain. Returns None if cancelled before start."""
     domain = _display_name(base_domain)
     scan_started = started_at or datetime.now()
+    resolved_options = apply_scan_profile(options)
 
     if cancel_check and cancel_check():
         return None
 
-    result = DomainScanResult(domain=domain)
+    result = DomainScanResult(domain=domain, input_record=input_record)
 
     _emit(f"--- Scanning {domain} ---", progress, messages)
     _emit_progress(
@@ -862,7 +1113,9 @@ def scan_domain(
         candidates_total=0,
         domains_completed=domains_completed,
         started_at=scan_started,
-        message=f"Scanning domain {domain_index} of {domain_total}: {domain}",
+        phase=ScanPhase.CHECKING_BASE.value,
+        message=f"Checking base SOA/NS for {domain}",
+        candidates_started=False,
     )
 
     wildcard_suspected, wildcard_logs = _wildcard_probe(domain)
@@ -926,6 +1179,19 @@ def scan_domain(
         )
 
     ns_hosts, ns_findings, ns_errors = discover_authoritative_nameservers(domain)
+    _emit_progress(
+        progress_update,
+        domain_index=domain_index,
+        domain_total=domain_total,
+        current_domain=domain,
+        candidates_tested=0,
+        candidates_total=0,
+        domains_completed=domains_completed,
+        started_at=scan_started,
+        phase=ScanPhase.DISCOVERING_AUTH_NS.value,
+        message=f"Discovering authoritative nameservers for {domain}",
+        candidates_started=False,
+    )
     if not ns_hosts:
         delegated_ns, delegated_findings, delegated_errors = discover_delegation_nameservers(domain)
         if delegated_ns:
@@ -970,7 +1236,7 @@ def scan_domain(
     else:
         _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
 
-    if options.query_authoritative_ns and ns_hosts:
+    if resolved_options.query_authoritative_ns and ns_hosts:
         for ns_host in ns_hosts:
             ns_ips = _resolve_nameserver_ips(ns_host)
             if not ns_ips:
@@ -999,7 +1265,20 @@ def scan_domain(
                 for error in auth_errors:
                     _emit(f"  Auth NS query error ({ns_host}): {error}", progress, messages)
 
-    if options.attempt_axfr and ns_hosts:
+    if resolved_options.attempt_axfr and ns_hosts:
+        _emit_progress(
+            progress_update,
+            domain_index=domain_index,
+            domain_total=domain_total,
+            current_domain=domain,
+            candidates_tested=0,
+            candidates_total=0,
+            domains_completed=domains_completed,
+            started_at=scan_started,
+            phase=ScanPhase.ATTEMPTING_AXFR.value,
+            message=f"Attempting AXFR for {domain}",
+            candidates_started=False,
+        )
         axfr_any = False
         for ns_host in ns_hosts:
             ns_ips = _resolve_nameserver_ips(ns_host)
@@ -1029,9 +1308,14 @@ def scan_domain(
                 messages,
             )
 
-    candidates = generate_candidates(domain, plan)
-    candidate_total = len(candidates)
-    _emit(f"  Candidate names to test: {candidate_total}", progress, messages)
+    fourth_candidates, fifth_candidates = generate_all_candidates(domain, plan, input_record)
+    candidate_total = len(fourth_candidates) + len(fifth_candidates)
+    _emit(
+        f"  Candidate names to test: {len(fourth_candidates)} 4th-level, "
+        f"{len(fifth_candidates)} 5th-level ({candidate_total} total)",
+        progress,
+        messages,
+    )
     _emit_progress(
         progress_update,
         domain_index=domain_index,
@@ -1041,96 +1325,70 @@ def scan_domain(
         candidates_total=candidate_total,
         domains_completed=domains_completed,
         started_at=scan_started,
-        message=f"Testing {candidate_total} candidate names for {domain}",
+        phase=ScanPhase.TESTING_FOURTH_LEVEL.value,
+        message=(
+            f"Candidate testing not started yet ({candidate_total} estimated)"
+            if candidate_total
+            else "No candidate names to test for this domain"
+        ),
+        candidates_started=False,
     )
 
-    subdelegation_count = 0
-    candidate_record_count = 0
-    empty_candidates = 0
-    candidates_tested = 0
-
-    for candidate_index, candidate in enumerate(candidates, start=1):
-        if cancel_check and cancel_check():
-            result.notes.append(PARTIAL_SCAN_MESSAGE)
-            _emit("  Scan cancellation requested; stopping candidate testing for this domain.", progress, messages)
-            break
-
-        if candidate_index % CANDIDATE_CANCEL_CHECK_INTERVAL == 0:
-            _emit_progress(
-                progress_update,
-                domain_index=domain_index,
-                domain_total=domain_total,
-                current_domain=domain,
-                candidates_tested=candidate_index,
-                candidates_total=len(candidates),
-                domains_completed=domains_completed,
-                started_at=scan_started,
-                message=(
-                    f"Scanning domain {domain_index} of {domain_total}: {domain} | "
-                    f"Candidates tested: {candidate_index} / {len(candidates)}"
-                ),
-            )
-
-        ns_findings, ns_candidate_errors = _query_records(
-            candidate,
-            (RecordType.NS,),
-            resolver,
-            source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
-            base_domain=domain,
-        )
-        if ns_findings:
-            subdelegation_count += 1
-            for item in ns_findings:
-                item.confidence = _confidence_for(
-                    wildcard_suspected, item.record_type, item.classification
-                )
-                result.records.append(item)
-            _emit(
-                f"    Delegated child zone: {candidate} NS {', '.join(item.value for item in ns_findings)}",
-                progress,
-                messages,
-            )
-
-        other_findings, candidate_errors = _query_records(
-            candidate,
-            CANDIDATE_RECORD_TYPES,
-            resolver,
-            source_method="generated_candidate",
-            classification=FindingClassification.STANDARD_RECORD,
-            base_domain=domain,
-        )
-        for item in other_findings:
-            item.confidence = _confidence_for(
-                wildcard_suspected, item.record_type, item.classification
-            )
-            candidate_record_count += 1
-            result.records.append(item)
-
-        if not ns_findings and not other_findings:
-            empty_candidates += 1
-
-        candidates_tested = candidate_index
-
-        for error in ns_candidate_errors + candidate_errors:
-            result.records.append(
-                DiscoveredRecord(
-                    fqdn=candidate,
-                    record_type=None,
-                    value=error,
-                    source_method="recursive_resolver",
-                    classification=FindingClassification.QUERY_ERROR,
-                )
-            )
-
-    _emit(
-        f"  Candidate summary: {candidates_tested} tested, "
-        f"{subdelegation_count} delegated child zone(s), "
-        f"{candidate_record_count} DNS name(s) with records, "
-        f"{empty_candidates} with no records discovered using tested methods",
-        progress,
-        messages,
+    fourth_tested = _test_candidates(
+        candidates=fourth_candidates,
+        domain=domain,
+        resolver=resolver,
+        result=result,
+        wildcard_suspected=wildcard_suspected,
+        progress=progress,
+        messages=messages,
+        cancel_check=cancel_check,
+        progress_update=progress_update,
+        domain_index=domain_index,
+        domain_total=domain_total,
+        domains_completed=domains_completed,
+        started_at=scan_started,
+        phase=ScanPhase.TESTING_FOURTH_LEVEL,
+        candidates_offset=0,
+        candidates_total=candidate_total,
     )
+    result.fourth_level_candidates_tested = fourth_tested
+
+    fifth_tested = 0
+    if fifth_candidates and not (cancel_check and cancel_check()):
+        _emit_progress(
+            progress_update,
+            domain_index=domain_index,
+            domain_total=domain_total,
+            current_domain=domain,
+            candidates_tested=fourth_tested,
+            candidates_total=candidate_total,
+            domains_completed=domains_completed,
+            started_at=scan_started,
+            phase=ScanPhase.TESTING_FIFTH_LEVEL.value,
+            message=f"Testing 5th-level candidate names for {domain}",
+            candidates_started=bool(fourth_tested or candidate_total),
+        )
+        fifth_tested = _test_candidates(
+            candidates=fifth_candidates,
+            domain=domain,
+            resolver=resolver,
+            result=result,
+            wildcard_suspected=wildcard_suspected,
+            progress=progress,
+            messages=messages,
+            cancel_check=cancel_check,
+            progress_update=progress_update,
+            domain_index=domain_index,
+            domain_total=domain_total,
+            domains_completed=domains_completed,
+            started_at=scan_started,
+            phase=ScanPhase.TESTING_FIFTH_LEVEL,
+            candidates_offset=fourth_tested,
+            candidates_total=candidate_total,
+        )
+    result.fifth_level_candidates_tested = fifth_tested
+    candidates_tested = fourth_tested + fifth_tested
 
     if wildcard_suspected:
         _emit(
@@ -1142,7 +1400,7 @@ def scan_domain(
     result.records = _dedupe_records(result.records)
 
     _emit(f"--- Completed {domain} ---", progress, messages)
-    result.candidates_tested = candidates_tested or len(candidates)
+    result.candidates_tested = candidates_tested or candidate_total
     return result
 
 
@@ -1158,17 +1416,40 @@ def run_scan(
     messages = result.status_messages
     cancel_check = cancel_token.is_cancelled if cancel_token else None
 
-    _emit("Starting DNS discovery scan.", progress_callback, messages)
+    _emit("Starting child domain discovery scan.", progress_callback, messages)
     _emit(
-        "Discovery results reflect tested methods only; absence of discovered records "
-        "is not proof that records or subdelegations do not exist.",
+        "Goal: find child DNS names beneath each known 3rd-level domain that are not "
+        "already listed in the system input.",
         progress_callback,
         messages,
     )
 
-    plan = build_wordlist_plan(scan_input.options, scan_input.wordlists_dir)
+    resolved_options = apply_scan_profile(scan_input.options)
+    scan_input = ScanInput(
+        domain_file_path=scan_input.domain_file_path,
+        options=resolved_options,
+        output_dir=scan_input.output_dir,
+        wordlists_dir=scan_input.wordlists_dir,
+    )
+
+    if progress_update:
+        _emit_progress(
+            progress_update,
+            domain_index=0,
+            domain_total=0,
+            current_domain="",
+            candidates_tested=0,
+            candidates_total=0,
+            domains_completed=0,
+            started_at=started_at,
+            phase=ScanPhase.LOADING_WORDLISTS.value,
+            message="Loading wordlists",
+            candidates_started=False,
+        )
+
+    plan = build_wordlist_plan(resolved_options, scan_input.wordlists_dir)
     result.wordlist_plan = plan
-    log_wordlist_plan(plan, scan_input.options, progress_callback, messages)
+    log_wordlist_plan(plan, resolved_options, progress_callback, messages)
 
     try:
         loaded = load_domain_inputs(scan_input.domain_file_path)
@@ -1191,6 +1472,9 @@ def run_scan(
         domains_loaded=loaded.domains_loaded,
         duplicate_domains_removed=loaded.duplicate_domains_removed,
         input_metadata_preserved=loaded.input_metadata_preserved,
+        selected_domain_column=loaded.selected_domain_column,
+        sample_domains_preview=loaded.sample_domains_preview,
+        input_warnings=loaded.input_warnings,
     )
 
     domain_names = [record.domain for record in loaded.domains]
@@ -1205,9 +1489,18 @@ def run_scan(
             progress_callback,
             messages,
         )
-    if loaded.duplicate_domains_removed:
+    if loaded.input_warnings:
+        for warning in loaded.input_warnings:
+            _emit(warning, progress_callback, messages)
+    if loaded.selected_domain_column:
         _emit(
-            f"  Duplicate domains removed: {loaded.duplicate_domains_removed}",
+            f"  Selected domain column: {loaded.selected_domain_column}",
+            progress_callback,
+            messages,
+        )
+    if loaded.sample_domains_preview:
+        _emit(
+            f"  First domains: {', '.join(loaded.sample_domains_preview)}",
             progress_callback,
             messages,
         )
@@ -1224,10 +1517,11 @@ def run_scan(
         try:
             domain_result = scan_domain(
                 domain,
-                scan_input.options,
+                resolved_options,
                 plan,
                 progress_callback,
                 messages,
+                input_record=input_record,
                 cancel_check=cancel_check,
                 progress_update=progress_update,
                 domain_index=index,
