@@ -209,10 +209,45 @@ Double-click the EXE to launch the GUI. Python does **not** need to be installed
 
 ### Where reports are saved
 
-| Mode | How to run | Report output folder |
-|------|------------|----------------------|
-| Source | `python app.py` | `output/` under the project root |
-| Packaged EXE | `dist/USLocalityDNSDiscovery.exe` | `output/` next to the EXE (e.g. `dist/output/`) |
+| Mode | Default output folder | Operator override |
+|------|----------------------|-------------------|
+| Source | `output/` under the project root | Use **Output Folder** in the GUI to choose any writable folder (including a network share) |
+| Packaged EXE | `output/` next to the EXE | Same **Output Folder** picker; set a shared path before export if needed |
+
+Reports never write to PyInstaller’s temporary `_MEIPASS` folder. The GUI **Preflight Summary** and log show the selected output folder before you scan or export.
+
+## Coworker handoff (packaged EXE)
+
+For handing the tool to a coworker who will run the packaged EXE:
+
+**What the coworker needs**
+
+- `USLocalityDNSDiscovery.exe`
+- Optional: this README or a short Quick Start note
+- Optional: a custom wordlist file **only if** they need extra labels beyond the built-in defaults
+
+**What they do not need**
+
+- Python installed
+- A separate `wordlists/` folder for built-in labels — packaged mode bundles read-only default wordlists inside the EXE
+
+**Where reports go**
+
+- By default: `output/` beside the EXE (for example `dist\output\` if the EXE lives in `dist\`)
+- To save elsewhere: use **Output Folder → Browse…** and pick a local or shared folder before **Export Results**
+- Use **Open Folder** to open the selected output directory after export
+
+**Network share / SmartScreen tips**
+
+- If running directly from a network share causes Windows SmartScreen, Defender, or permission issues:
+  1. Copy `USLocalityDNSDiscovery.exe` to a local folder (for example `C:\Tools\USLocalityDNS\`)
+  2. Run the EXE locally
+  3. Set **Output Folder** to the shared team folder where reports should land
+
+**Custom wordlists**
+
+- Built-in wordlists are bundled in packaged mode and are not editable after packaging.
+- To use additional labels, browse for a custom `.txt` or `.csv` wordlist in the GUI — no project `wordlists/` copy is required unless the coworker wants to edit built-in defaults in source mode.
 
 ### Packaged paths and wordlists
 
@@ -253,7 +288,7 @@ Choose export format:
 - **JSON** — advanced/debugging export
 - **All formats** — XLSX, findings CSV, summary CSV, and JSON
 
-Reports are written to the [output folder for your mode](#where-reports-are-saved) with timestamped filenames such as:
+Reports are written to the **selected Output Folder** (default shown in the GUI) with timestamped filenames such as:
 
 - `us_locality_dns_report_YYYYMMDD_HHMMSS.xlsx`
 - `us_locality_dns_discovery_YYYYMMDD_HHMMSS.csv`

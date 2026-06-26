@@ -33,7 +33,14 @@ from scanner.models import (
     ScanStatus,
     WordlistPlan,
 )
-from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
+from scanner.paths import (
+    ensure_output_dir,
+    get_app_base_dir,
+    get_default_output_dir,
+    get_output_dir,
+    get_wordlists_dir,
+    is_frozen,
+)
 from scanner.scan_engine import (
     build_preflight_summary,
     build_wordlist_plan,
@@ -78,9 +85,12 @@ __all__ = [
     "export_json",
     "export_results",
     "export_xlsx_report",
+    "ensure_output_dir",
     "get_app_base_dir",
+    "get_default_output_dir",
     "get_output_dir",
     "get_wordlists_dir",
+    "is_frozen",
     "load_domain_inputs",
     "load_domains",
     "run_scan",

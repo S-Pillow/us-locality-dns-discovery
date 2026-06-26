@@ -14,6 +14,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from scanner.paths import is_frozen
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.models import (
     DiscoveredRecord,
@@ -1037,6 +1038,9 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = [
         ("app_name", APP_NAME),
         ("scan_timestamp", _format_timestamp(result.scan_timestamp)),
+        ("export_timestamp", _format_timestamp(result.finished_at or result.scan_timestamp)),
+        ("output_folder", str(result.input.output_dir.resolve()) if result.input.output_dir else ""),
+        ("packaged_mode", str(is_frozen()).lower()),
         ("input_file_type", load_info.input_file_type if load_info else ""),
         ("metadata_columns_detected", ", ".join(load_info.metadata_columns_detected) if load_info else ""),
         ("domains_loaded", str(load_info.domains_loaded if load_info else len(result.domain_inputs))),

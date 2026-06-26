@@ -23,10 +23,39 @@ def get_app_base_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def get_default_output_dir() -> Path:
+    """Default writable output directory beside the app or project root."""
+    return get_app_base_dir() / "output"
+
+
+def ensure_output_dir(path: Path) -> tuple[bool, str]:
+    """
+    Create the output directory if needed and verify it is writable.
+
+    Returns (success, message).
+    """
+    target = path.resolve()
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return False, f"Could not create output folder: {target} ({exc})"
+
+    probe = target / ".write_test"
+    try:
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+    except OSError as exc:
+        return False, f"Output folder is not writable: {target} ({exc})"
+
+    return True, f"Output folder OK: {target}"
+
+
 def get_output_dir() -> Path:
-    """Writable output directory for scan reports."""
-    output_dir = get_app_base_dir() / "output"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Return the default output directory, creating it when possible."""
+    output_dir = get_default_output_dir()
+    ok, message = ensure_output_dir(output_dir)
+    if not ok:
+        raise OSError(message)
     return output_dir
 
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import tkinter as tk
 from datetime import datetime
@@ -11,7 +12,7 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from scanner.export_service import export_results
 from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProgressUpdate, ScanRunResult
-from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
+from scanner.paths import ensure_output_dir, get_default_output_dir, get_wordlists_dir
 from scanner.input_loader import load_domain_inputs
 from scanner.scan_engine import (
     build_preflight_summary,
@@ -23,8 +24,7 @@ from scanner.scan_engine import (
 )
 
 APP_TITLE = ".US Locality DNS Discovery Tool"
-PROJECT_ROOT = get_app_base_dir()
-OUTPUT_DIR = get_output_dir()
+DEFAULT_OUTPUT_DIR = get_default_output_dir()
 WORDLISTS_DIR = get_wordlists_dir()
 
 
@@ -39,6 +39,7 @@ class DiscoveryApp(tk.Tk):
 
         self.domain_file_var = tk.StringVar()
         self.wordlist_file_var = tk.StringVar()
+        self.output_folder_var = tk.StringVar(value=str(DEFAULT_OUTPUT_DIR.resolve()))
 
         self.rfc_locality_var = tk.BooleanVar(value=True)
         self.dns_common_var = tk.BooleanVar(value=True)
@@ -57,13 +58,16 @@ class DiscoveryApp(tk.Tk):
 
         self.wordlist_file_var.trace_add("write", self._on_wordlist_path_changed)
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        ok, message = ensure_output_dir(DEFAULT_OUTPUT_DIR)
+        if not ok:
+            messagebox.showwarning("Output folder", message)
 
         self._build_ui()
         self._bind_preflight_refresh()
         self._on_wordlist_path_changed()
         self._refresh_preflight()
         self._log("Ready. Select a domain list and click Run Scan to begin DNS discovery.")
+        self._log(f"Output folder: {self.output_folder_var.get()}")
 
     def _build_ui(self) -> None:
         main = ttk.Frame(self, padding=12)
@@ -86,6 +90,7 @@ class DiscoveryApp(tk.Tk):
             variable=self.wordlist_file_var,
             command=self._browse_wordlist_file,
         )
+        self._add_output_folder_row(files_frame, row=2)
 
         wordlist_frame = ttk.LabelFrame(main, text="Wordlist Sources", padding=10)
         wordlist_frame.pack(fill=tk.X, pady=(0, 10))
@@ -202,6 +207,61 @@ class DiscoveryApp(tk.Tk):
         ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, pady=4)
         parent.columnconfigure(1, weight=1)
 
+    def _add_output_folder_row(self, parent: ttk.Frame, row: int) -> None:
+        ttk.Label(parent, text="Output folder:").grid(row=row, column=0, sticky=tk.W, pady=4)
+        entry = ttk.Entry(parent, textvariable=self.output_folder_var, width=70)
+        entry.grid(row=row, column=1, sticky=tk.EW, padx=(8, 8), pady=4)
+        button_frame = ttk.Frame(parent)
+        button_frame.grid(row=row, column=2, pady=4)
+        ttk.Button(button_frame, text="Browse…", command=self._browse_output_folder).pack(side=tk.LEFT)
+        ttk.Button(button_frame, text="Open Folder", command=self._open_output_folder).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        parent.columnconfigure(1, weight=1)
+
+    def _browse_output_folder(self) -> None:
+        initial = self.output_folder_var.get().strip() or str(DEFAULT_OUTPUT_DIR.resolve())
+        path = filedialog.askdirectory(
+            title="Select output folder for reports",
+            initialdir=initial if Path(initial).is_dir() else str(DEFAULT_OUTPUT_DIR.resolve()),
+        )
+        if path:
+            self.output_folder_var.set(path)
+            ok, message = ensure_output_dir(Path(path))
+            self._log(message)
+            if not ok:
+                messagebox.showerror("Output folder", message)
+            self._refresh_preflight()
+
+    def _open_output_folder(self) -> None:
+        ok, output_dir = self._resolve_output_folder(show_error=True)
+        if not ok or output_dir is None:
+            return
+        try:
+            os.startfile(output_dir)  # noqa: S606 — Windows folder open for operator convenience
+        except OSError as exc:
+            self._log(f"Could not open output folder: {exc}")
+            messagebox.showerror("Open folder", f"Could not open output folder:\n{exc}")
+
+    def _resolve_output_folder(self, *, show_error: bool = False) -> tuple[bool, Path | None]:
+        folder_text = self.output_folder_var.get().strip()
+        if not folder_text:
+            message = "No output folder selected."
+            if show_error:
+                self._log(message)
+                messagebox.showerror("Output folder", message)
+            return False, None
+
+        output_dir = Path(folder_text)
+        ok, message = ensure_output_dir(output_dir)
+        if show_error:
+            self._log(message)
+            if not ok:
+                messagebox.showerror("Output folder", message)
+        if not ok:
+            return False, None
+        return True, output_dir.resolve()
+
     def _browse_domain_file(self) -> None:
         path = filedialog.askopenfilename(
             title="Select domain list file",
@@ -256,19 +316,34 @@ class DiscoveryApp(tk.Tk):
         ):
             variable.trace_add("write", lambda *_args: self._refresh_preflight())
         self.domain_file_var.trace_add("write", lambda *_args: self._refresh_preflight())
+        self.output_folder_var.trace_add("write", lambda *_args: self._refresh_preflight())
 
-    def _build_scan_input(self, domain_path: Path, wordlist_path: Path | None) -> ScanInput:
+    def _build_scan_input(
+        self,
+        domain_path: Path,
+        wordlist_path: Path | None,
+        *,
+        validate_output: bool = False,
+    ) -> ScanInput:
+        ok, output_dir = self._resolve_output_folder(show_error=validate_output)
+        if not ok or output_dir is None:
+            raise OSError("Output folder is not available.")
+
         return ScanInput(
             domain_file_path=domain_path,
             options=self._collect_scan_options(wordlist_path),
-            output_dir=OUTPUT_DIR,
+            output_dir=output_dir,
             wordlists_dir=WORDLISTS_DIR,
         )
 
     def _refresh_preflight(self) -> None:
+        output_line = f"  Output folder: {self.output_folder_var.get() or DEFAULT_OUTPUT_DIR}\n"
+
         domain_path_str = self.domain_file_var.get().strip()
         if not domain_path_str:
-            self.preflight_var.set("Select a domain list to view preflight estimate.")
+            self.preflight_var.set(
+                "Select a domain list to view preflight estimate.\n" + output_line.rstrip()
+            )
             return
 
         domain_path = Path(domain_path_str)
@@ -293,9 +368,14 @@ class DiscoveryApp(tk.Tk):
                 self.preflight_var.set("Preflight unavailable: invalid custom wordlist file.")
                 return
 
-        summary = build_preflight_summary(self._build_scan_input(domain_path, wordlist_path))
+        summary = build_preflight_summary(
+            self._build_scan_input(domain_path, wordlist_path, validate_output=False)
+        )
         if summary is None:
-            self.preflight_var.set("Preflight unavailable: could not read domain list.")
+            self.preflight_var.set(
+                "Preflight unavailable: could not read domain list or output folder.\n"
+                + output_line.rstrip()
+            )
             return
 
         sources = ", ".join(summary.wordlist_sources.keys()) if summary.wordlist_sources else "(none)"
@@ -316,6 +396,7 @@ class DiscoveryApp(tk.Tk):
             f"  Input type: {summary.input_file_type}\n"
             f"{metadata_line}"
             f"{duplicate_line}"
+            f"{output_line}"
             f"  Wordlist sources: {sources}\n"
             f"  Total unique candidate labels: {summary.total_unique_labels}\n"
             f"  Estimated candidate names per domain: {summary.estimated_candidates_per_domain}\n"
@@ -458,7 +539,14 @@ class DiscoveryApp(tk.Tk):
         if not valid or domain_path is None:
             return
 
-        scan_input = self._build_scan_input(domain_path, wordlist_path)
+        try:
+            scan_input = self._build_scan_input(domain_path, wordlist_path, validate_output=True)
+        except OSError as exc:
+            self._log(str(exc))
+            messagebox.showerror("Output folder", str(exc))
+            return
+
+        self._log(f"Output folder: {scan_input.output_dir}")
         self._log_scan_options(scan_input.options)
 
         preflight = build_preflight_summary(scan_input)
@@ -579,8 +667,12 @@ class DiscoveryApp(tk.Tk):
             self._log("Export cancelled.")
             return
 
+        ok, output_dir = self._resolve_output_folder(show_error=True)
+        if not ok or output_dir is None:
+            return
+
         try:
-            outcome = export_results(self._last_scan_result, OUTPUT_DIR, export_format)
+            outcome = export_results(self._last_scan_result, output_dir, export_format)
         except OSError as exc:
             self._log(f"Export failed: {exc}")
             messagebox.showerror("Export failed", f"Could not write export files:\n{exc}")
@@ -591,6 +683,7 @@ class DiscoveryApp(tk.Tk):
             return
 
         self._log("Export complete:")
+        self._log(f"  Output folder: {output_dir}")
         if outcome.xlsx_path:
             self._log(f"  XLSX: {outcome.xlsx_path}")
         if outcome.csv_path:
