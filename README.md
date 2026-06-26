@@ -18,6 +18,9 @@ What works today:
 - Real DNS discovery for base domains and generated candidate subdomains
 - Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
 - **Export Results** to timestamped **XLSX workbook** (recommended), findings CSV, summary CSV, and JSON in `output/` after a completed scan
+- **Preflight summary** with domain/candidate estimates and warning level before scanning
+- **Progress bar and live progress text** during scans
+- **Cancel Scan** with safe checkpoint cancellation and partial-result export
 
 ## Wordlist sources
 
@@ -102,6 +105,25 @@ Every report includes:
 > DNS discovery results show only records found through the tested methods. No records discovered does not prove that no subdelegations or DNS records exist.
 
 Reports are created only when you click **Export Results** — scans do not auto-write report files.
+
+## Large scan controls
+
+Before starting, the **Preflight Summary** shows:
+
+- Domains loaded
+- Selected wordlist sources
+- Estimated candidate names per domain and total
+- AXFR / authoritative NS settings
+- Warning level: `low`, `moderate`, `large`, or `very large`
+
+Confirmation is required when the estimated total candidate names is **10,000+** (large) or **50,000+** (very large). For example, ~157 domains with default wordlists (~428 candidates each) is about **67,000** total candidates and triggers the very-large warning.
+
+During a scan:
+
+- **Run Scan** and **Export Results** are disabled
+- **Cancel Scan** requests cancellation at the next safe checkpoint (between domains or during candidate batches)
+- Partial results may be exported if at least one domain completed before cancellation
+- Exported reports note when results are partial/cancelled
 
 ## Discovery vs. authoritative truth
 

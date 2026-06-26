@@ -10,8 +10,13 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from scanner.export_service import export_results
-from scanner.models import ScanInput, ScanOptions, ScanRunResult
-from scanner.scan_engine import run_scan, validate_domain_file, validate_wordlist_file
+from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProgressUpdate, ScanRunResult
+from scanner.scan_engine import (
+    build_preflight_summary,
+    run_scan,
+    validate_domain_file,
+    validate_wordlist_file,
+)
 
 APP_TITLE = ".US Locality DNS Discovery Tool"
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -44,13 +49,16 @@ class DiscoveryApp(tk.Tk):
 
         self._scan_thread: threading.Thread | None = None
         self._last_scan_result: ScanRunResult | None = None
+        self._cancel_token: CancellationToken | None = None
 
         self.wordlist_file_var.trace_add("write", self._on_wordlist_path_changed)
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
+        self._bind_preflight_refresh()
         self._on_wordlist_path_changed()
+        self._refresh_preflight()
         self._log("Ready. Select a domain list and click Run Scan to begin DNS discovery.")
 
     def _build_ui(self) -> None:
@@ -114,11 +122,47 @@ class DiscoveryApp(tk.Tk):
             variable=self.auth_ns_var,
         ).grid(row=0, column=1, sticky=tk.W, pady=2)
 
+        preflight_frame = ttk.LabelFrame(main, text="Preflight Summary", padding=10)
+        preflight_frame.pack(fill=tk.X, pady=(0, 10))
+        self.preflight_var = tk.StringVar(value="Select a domain list to view preflight estimate.")
+        ttk.Label(
+            preflight_frame,
+            textvariable=self.preflight_var,
+            justify=tk.LEFT,
+            wraplength=860,
+        ).pack(anchor=tk.W)
+
+        progress_frame = ttk.LabelFrame(main, text="Scan Progress", padding=10)
+        progress_frame.pack(fill=tk.X, pady=(0, 10))
+        self.progress_var = tk.DoubleVar(value=0.0)
+        self.progress_bar = ttk.Progressbar(
+            progress_frame,
+            variable=self.progress_var,
+            maximum=100,
+            mode="determinate",
+        )
+        self.progress_bar.pack(fill=tk.X, pady=(0, 6))
+        self.progress_text_var = tk.StringVar(value="Scan not running.")
+        ttk.Label(
+            progress_frame,
+            textvariable=self.progress_text_var,
+            justify=tk.LEFT,
+            wraplength=860,
+        ).pack(anchor=tk.W)
+
         actions_frame = ttk.Frame(main)
         actions_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.run_button = ttk.Button(actions_frame, text="Run Scan", command=self._on_run_scan)
         self.run_button.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.cancel_button = ttk.Button(
+            actions_frame,
+            text="Cancel Scan",
+            command=self._on_cancel_scan,
+            state=tk.DISABLED,
+        )
+        self.cancel_button.pack(side=tk.LEFT, padx=(0, 8))
 
         self.export_button = ttk.Button(
             actions_frame,
@@ -167,6 +211,7 @@ class DiscoveryApp(tk.Tk):
         if path:
             self.domain_file_var.set(path)
             self._log(f"Selected domain file: {path}")
+            self._refresh_preflight()
 
     def _browse_wordlist_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -191,6 +236,105 @@ class DiscoveryApp(tk.Tk):
         else:
             self.include_custom_var.set(False)
             self.custom_wordlist_check.configure(state=tk.DISABLED)
+        self._refresh_preflight()
+
+    def _bind_preflight_refresh(self) -> None:
+        for variable in (
+            self.rfc_locality_var,
+            self.dns_common_var,
+            self.civic_departments_var,
+            self.public_services_var,
+            self.schools_libraries_var,
+            self.delegated_manager_var,
+            self.include_custom_var,
+            self.axfr_var,
+            self.auth_ns_var,
+        ):
+            variable.trace_add("write", lambda *_args: self._refresh_preflight())
+        self.domain_file_var.trace_add("write", lambda *_args: self._refresh_preflight())
+
+    def _build_scan_input(self, domain_path: Path, wordlist_path: Path | None) -> ScanInput:
+        return ScanInput(
+            domain_file_path=domain_path,
+            options=self._collect_scan_options(wordlist_path),
+            output_dir=OUTPUT_DIR,
+            wordlists_dir=WORDLISTS_DIR,
+        )
+
+    def _refresh_preflight(self) -> None:
+        domain_path_str = self.domain_file_var.get().strip()
+        if not domain_path_str:
+            self.preflight_var.set("Select a domain list to view preflight estimate.")
+            return
+
+        domain_path = Path(domain_path_str)
+        ok, _message = validate_domain_file(domain_path)
+        if not ok:
+            self.preflight_var.set("Preflight unavailable: invalid or missing domain list file.")
+            return
+
+        wordlist_path_str = self.wordlist_file_var.get().strip()
+        wordlist_path = Path(wordlist_path_str) if wordlist_path_str else None
+        if wordlist_path:
+            ok, _message = validate_wordlist_file(wordlist_path)
+            if not ok:
+                self.preflight_var.set("Preflight unavailable: invalid custom wordlist file.")
+                return
+
+        summary = build_preflight_summary(self._build_scan_input(domain_path, wordlist_path))
+        if summary is None:
+            self.preflight_var.set("Preflight unavailable: could not read domain list.")
+            return
+
+        sources = ", ".join(summary.wordlist_sources.keys()) if summary.wordlist_sources else "(none)"
+        self.preflight_var.set(
+            "Preflight estimate (discovery-based; not a complete inventory):\n"
+            f"  Domains loaded: {summary.domain_count}\n"
+            f"  Wordlist sources: {sources}\n"
+            f"  Total unique candidate labels: {summary.total_unique_labels}\n"
+            f"  Estimated candidate names per domain: {summary.estimated_candidates_per_domain}\n"
+            f"  Estimated total candidate names: {summary.estimated_total_candidates:,}\n"
+            f"  AXFR enabled: {'yes' if summary.axfr_enabled else 'no'}\n"
+            f"  Authoritative NS querying enabled: {'yes' if summary.auth_ns_enabled else 'no'}\n"
+            f"  Warning level: {summary.warning_level}"
+        )
+
+    def _confirm_scan_start(self, total_candidates: int) -> bool:
+        if total_candidates >= 50_000:
+            return messagebox.askyesno(
+                "Very Large Scan",
+                "This is a very large scan and may take a long time. "
+                "Consider using fewer wordlist sources or testing a smaller subset first.\n\n"
+                f"Estimated candidate names: {total_candidates:,}\n\nContinue?",
+            )
+        if total_candidates >= 10_000:
+            return messagebox.askyesno(
+                "Large Scan",
+                "This scan may take a long time.\n\n"
+                f"Estimated candidate names: {total_candidates:,}\n\nContinue?",
+            )
+        return True
+
+    def _update_progress(self, update: ScanProgressUpdate) -> None:
+        if update.domain_total > 0:
+            completed_fraction = update.domains_completed / update.domain_total
+            current_domain_fraction = 0.0
+            if update.candidates_total > 0:
+                current_domain_fraction = (update.candidates_tested / update.candidates_total) / update.domain_total
+            self.progress_var.set(min((completed_fraction + current_domain_fraction) * 100, 100))
+
+        elapsed_minutes, elapsed_seconds = divmod(int(update.elapsed_seconds), 60)
+        self.progress_text_var.set(
+            f"Scanning domain {update.domain_index} of {update.domain_total}: {update.current_domain}\n"
+            f"Candidates tested for current domain: {update.candidates_tested} / {update.candidates_total}\n"
+            f"Completed domains: {update.domains_completed} / {update.domain_total}\n"
+            f"Elapsed: {elapsed_minutes}m {elapsed_seconds}s"
+        )
+
+    def _reset_progress_ui(self, message: str = "Scan not running.") -> None:
+        self.progress_var.set(0)
+        self.progress_text_var.set(message)
+        self.cancel_button.configure(state=tk.DISABLED)
 
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -262,9 +406,18 @@ class DiscoveryApp(tk.Tk):
         self.run_button.configure(state=tk.DISABLED if running else tk.NORMAL)
         if running:
             self.export_button.configure(state=tk.DISABLED)
+            self.cancel_button.configure(state=tk.NORMAL)
+        else:
+            self.cancel_button.configure(state=tk.DISABLED)
 
     def _set_export_enabled(self, enabled: bool) -> None:
         self.export_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
+
+    def _on_cancel_scan(self) -> None:
+        if self._cancel_token is not None:
+            self._cancel_token.cancel()
+            self._log("Cancellation requested. Scan will stop at the next safe checkpoint.")
+            self.cancel_button.configure(state=tk.DISABLED)
 
     def _on_run_scan(self) -> None:
         if self._scan_thread and self._scan_thread.is_alive():
@@ -276,24 +429,38 @@ class DiscoveryApp(tk.Tk):
         if not valid or domain_path is None:
             return
 
-        options = self._collect_scan_options(wordlist_path)
-        self._log_scan_options(options)
+        scan_input = self._build_scan_input(domain_path, wordlist_path)
+        self._log_scan_options(scan_input.options)
 
-        scan_input = ScanInput(
-            domain_file_path=domain_path,
-            options=options,
-            output_dir=OUTPUT_DIR,
-            wordlists_dir=WORDLISTS_DIR,
-        )
+        preflight = build_preflight_summary(scan_input)
+        if preflight is None:
+            messagebox.showerror("Preflight failed", "Could not build preflight estimate from the domain list.")
+            return
 
+        self._refresh_preflight()
+        if not self._confirm_scan_start(preflight.estimated_total_candidates):
+            self._log("Scan start cancelled by operator.")
+            return
+
+        self._cancel_token = CancellationToken()
         self._set_scan_running(True)
+        self.progress_var.set(0)
+        self.progress_text_var.set("Starting scan...")
 
         def progress(message: str) -> None:
             self.after(0, lambda m=message: self._log(m))
 
+        def progress_update(update: ScanProgressUpdate) -> None:
+            self.after(0, lambda u=update: self._update_progress(u))
+
         def worker() -> None:
             try:
-                result = run_scan(scan_input, progress_callback=progress)
+                result = run_scan(
+                    scan_input,
+                    progress_callback=progress,
+                    progress_update=progress_update,
+                    cancel_token=self._cancel_token,
+                )
                 self.after(0, lambda: self._on_scan_complete(result))
             except Exception as exc:  # noqa: BLE001
                 self.after(0, lambda: self._on_scan_error(exc))
@@ -304,15 +471,38 @@ class DiscoveryApp(tk.Tk):
     def _on_scan_complete(self, result: ScanRunResult) -> None:
         self._last_scan_result = result
         self._set_scan_running(False)
+        self._cancel_token = None
+
+        if result.cancelled:
+            self.progress_var.set(
+                (len(result.domain_results) / result.domains_total * 100) if result.domains_total else 0
+            )
+            self.progress_text_var.set(
+                f"Scan cancelled. Completed {len(result.domain_results)} of {result.domains_total} domains."
+            )
+            self._log("Scan was cancelled. Results are partial.")
+        elif result.domain_results:
+            self.progress_var.set(100)
+            elapsed = result.elapsed_seconds or 0.0
+            self.progress_text_var.set(
+                f"Scan complete. {len(result.domain_results)} domains scanned in {elapsed:.1f}s."
+            )
+
         if result.domain_results:
             self._set_export_enabled(True)
-            self._log("Scan complete. Export Results is now available.")
+            if result.partial:
+                self._log("Partial results are available for export.")
+            else:
+                self._log("Scan complete. Export Results is now available.")
         else:
             self._set_export_enabled(False)
+            self._reset_progress_ui("Scan finished with no domain results to export.")
             self._log("Scan finished with no domain results to export.")
 
     def _on_scan_error(self, exc: Exception) -> None:
         self._set_scan_running(False)
+        self._cancel_token = None
+        self._reset_progress_ui("Scan failed.")
         self._log(f"Scan failed: {exc.__class__.__name__}: {exc}")
         messagebox.showerror("Scan error", f"The scan encountered an error:\n{exc}")
 

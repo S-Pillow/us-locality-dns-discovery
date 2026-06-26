@@ -6,6 +6,7 @@ import csv
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import dns.exception
 import dns.query
@@ -14,14 +15,19 @@ import dns.resolver
 import dns.zone
 
 from scanner.models import (
+    CancellationToken,
     DiscoveredRecord,
     DomainScanResult,
     FindingClassification,
+    PreflightSummary,
     ProgressCallback,
     RecordType,
     ScanInput,
     ScanOptions,
+    ScanProgressCallback,
+    ScanProgressUpdate,
     ScanRunResult,
+    ScanStatus,
     WordlistPlan,
 )
 
@@ -69,6 +75,11 @@ FIFTH_LEVEL_PREFIX_SOURCES = (
     "include_civic_departments",
     "include_public_services",
     "include_schools_libraries",
+)
+
+CANDIDATE_CANCEL_CHECK_INTERVAL = 5
+PARTIAL_SCAN_MESSAGE = (
+    "This scan was cancelled before all domains were completed. Results are partial."
 )
 
 
@@ -181,6 +192,69 @@ def build_wordlist_plan(options: ScanOptions, wordlists_dir: Path) -> WordlistPl
         fifth_level_prefix_count=len(fifth_prefix_labels),
         unique_labels=unique_labels,
         fifth_level_prefix_labels=fifth_prefix_labels,
+    )
+
+
+def compute_warning_level(total_candidates: int) -> str:
+    """Return operator-facing warning level for total candidate estimate."""
+    if total_candidates >= 50_000:
+        return "very large"
+    if total_candidates >= 10_000:
+        return "large"
+    if total_candidates >= 1_000:
+        return "moderate"
+    return "low"
+
+
+def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
+    """Build pre-scan estimate from the current input file and options."""
+    try:
+        domains = load_domains(scan_input.domain_file_path)
+    except OSError:
+        return None
+
+    plan = build_wordlist_plan(scan_input.options, scan_input.wordlists_dir)
+    per_domain = plan.estimated_candidates_per_domain
+    total = len(domains) * per_domain
+
+    return PreflightSummary(
+        domain_count=len(domains),
+        wordlist_sources=plan.source_counts,
+        total_unique_labels=plan.total_unique_labels,
+        estimated_candidates_per_domain=per_domain,
+        estimated_total_candidates=total,
+        axfr_enabled=scan_input.options.attempt_axfr,
+        auth_ns_enabled=scan_input.options.query_authoritative_ns,
+        warning_level=compute_warning_level(total),
+    )
+
+
+def _emit_progress(
+    progress_update: ScanProgressCallback | None,
+    *,
+    domain_index: int,
+    domain_total: int,
+    current_domain: str,
+    candidates_tested: int,
+    candidates_total: int,
+    domains_completed: int,
+    started_at: datetime,
+    message: str = "",
+) -> None:
+    if progress_update is None:
+        return
+    elapsed = (datetime.now() - started_at).total_seconds()
+    progress_update(
+        ScanProgressUpdate(
+            domain_index=domain_index,
+            domain_total=domain_total,
+            current_domain=current_domain,
+            candidates_tested=candidates_tested,
+            candidates_total=candidates_total,
+            domains_completed=domains_completed,
+            elapsed_seconds=elapsed,
+            message=message,
+        )
     )
 
 
@@ -464,12 +538,35 @@ def scan_domain(
     plan: WordlistPlan,
     progress: ProgressCallback | None,
     messages: list[str],
-) -> DomainScanResult:
-    """Run discovery for a single base domain."""
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+    progress_update: ScanProgressCallback | None = None,
+    domain_index: int = 1,
+    domain_total: int = 1,
+    domains_completed: int = 0,
+    started_at: datetime | None = None,
+) -> DomainScanResult | None:
+    """Run discovery for a single base domain. Returns None if cancelled before start."""
     domain = _display_name(base_domain)
+    scan_started = started_at or datetime.now()
+
+    if cancel_check and cancel_check():
+        return None
+
     result = DomainScanResult(domain=domain)
 
     _emit(f"--- Scanning {domain} ---", progress, messages)
+    _emit_progress(
+        progress_update,
+        domain_index=domain_index,
+        domain_total=domain_total,
+        current_domain=domain,
+        candidates_tested=0,
+        candidates_total=0,
+        domains_completed=domains_completed,
+        started_at=scan_started,
+        message=f"Scanning domain {domain_index} of {domain_total}: {domain}",
+    )
 
     wildcard_suspected, wildcard_logs = _wildcard_probe(domain)
     result.wildcard_suspected = wildcard_suspected
@@ -589,14 +686,47 @@ def scan_domain(
             )
 
     candidates = generate_candidates(domain, plan)
-    result.candidates_tested = len(candidates)
-    _emit(f"  Candidate names to test: {len(candidates)}", progress, messages)
+    candidate_total = len(candidates)
+    _emit(f"  Candidate names to test: {candidate_total}", progress, messages)
+    _emit_progress(
+        progress_update,
+        domain_index=domain_index,
+        domain_total=domain_total,
+        current_domain=domain,
+        candidates_tested=0,
+        candidates_total=candidate_total,
+        domains_completed=domains_completed,
+        started_at=scan_started,
+        message=f"Testing {candidate_total} candidate names for {domain}",
+    )
 
     subdelegation_count = 0
     candidate_record_count = 0
     empty_candidates = 0
+    candidates_tested = 0
 
-    for candidate in candidates:
+    for candidate_index, candidate in enumerate(candidates, start=1):
+        if cancel_check and cancel_check():
+            result.notes.append(PARTIAL_SCAN_MESSAGE)
+            _emit("  Scan cancellation requested; stopping candidate testing for this domain.", progress, messages)
+            break
+
+        if candidate_index % CANDIDATE_CANCEL_CHECK_INTERVAL == 0:
+            _emit_progress(
+                progress_update,
+                domain_index=domain_index,
+                domain_total=domain_total,
+                current_domain=domain,
+                candidates_tested=candidate_index,
+                candidates_total=len(candidates),
+                domains_completed=domains_completed,
+                started_at=scan_started,
+                message=(
+                    f"Scanning domain {domain_index} of {domain_total}: {domain} | "
+                    f"Candidates tested: {candidate_index} / {len(candidates)}"
+                ),
+            )
+
         ns_findings, ns_candidate_errors = _query_records(
             candidate,
             (RecordType.NS,),
@@ -634,6 +764,8 @@ def scan_domain(
         if not ns_findings and not other_findings:
             empty_candidates += 1
 
+        candidates_tested = candidate_index
+
         for error in ns_candidate_errors + candidate_errors:
             result.records.append(
                 DiscoveredRecord(
@@ -646,7 +778,7 @@ def scan_domain(
             )
 
     _emit(
-        f"  Candidate summary: {len(candidates)} tested, "
+        f"  Candidate summary: {candidates_tested} tested, "
         f"{subdelegation_count} possible subdelegation(s), "
         f"{candidate_record_count} other record(s), "
         f"{empty_candidates} with no records discovered using tested methods",
@@ -662,16 +794,21 @@ def scan_domain(
         )
 
     _emit(f"--- Completed {domain} ---", progress, messages)
+    result.candidates_tested = candidates_tested or len(candidates)
     return result
 
 
 def run_scan(
     scan_input: ScanInput,
     progress_callback: ProgressCallback | None = None,
+    progress_update: ScanProgressCallback | None = None,
+    cancel_token: CancellationToken | None = None,
 ) -> ScanRunResult:
     """Run DNS discovery for all domains in the input file."""
-    result = ScanRunResult(input=scan_input, scan_timestamp=datetime.now())
+    started_at = datetime.now()
+    result = ScanRunResult(input=scan_input, scan_timestamp=started_at, started_at=started_at)
     messages = result.status_messages
+    cancel_check = cancel_token.is_cancelled if cancel_token else None
 
     _emit("Starting DNS discovery scan.", progress_callback, messages)
     _emit(
@@ -696,8 +833,14 @@ def run_scan(
         return result
 
     _emit(f"Loaded {len(domains)} domain(s): {', '.join(domains)}", progress_callback, messages)
+    result.domains_total = len(domains)
+    result.domains_planned = domains
 
-    for domain in domains:
+    for index, domain in enumerate(domains, start=1):
+        if cancel_check and cancel_check():
+            _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
+            break
+
         try:
             domain_result = scan_domain(
                 domain,
@@ -705,8 +848,31 @@ def run_scan(
                 plan,
                 progress_callback,
                 messages,
+                cancel_check=cancel_check,
+                progress_update=progress_update,
+                domain_index=index,
+                domain_total=len(domains),
+                domains_completed=len(result.domain_results),
+                started_at=started_at,
             )
+            if domain_result is None:
+                _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
+                break
             result.domain_results.append(domain_result)
+            _emit_progress(
+                progress_update,
+                domain_index=index,
+                domain_total=len(domains),
+                current_domain=domain,
+                candidates_tested=domain_result.candidates_tested,
+                candidates_total=domain_result.candidates_tested,
+                domains_completed=len(result.domain_results),
+                started_at=started_at,
+                message=f"Completed domain {len(result.domain_results)} of {len(domains)}: {domain}",
+            )
+            if cancel_check and cancel_check():
+                _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
+                break
         except Exception as exc:  # noqa: BLE001 — keep GUI alive on unexpected errors
             _emit(f"Unexpected error scanning {domain}: {exc.__class__.__name__}: {exc}", progress_callback, messages)
             result.domain_results.append(
@@ -716,15 +882,30 @@ def run_scan(
                 )
             )
 
+    finished_at = datetime.now()
+    result.finished_at = finished_at
+    result.elapsed_seconds = (finished_at - started_at).total_seconds()
+
+    cancelled = bool(cancel_check and cancel_check())
+    result.cancelled = cancelled
+    result.partial = cancelled and len(result.domain_results) < len(domains)
+    result.scan_status = ScanStatus.CANCELLED if cancelled else ScanStatus.COMPLETED
+
     total_records = sum(len(item.records) for item in result.domain_results)
     total_candidates = sum(item.candidates_tested for item in result.domain_results)
     wildcard_domains = [item.domain for item in result.domain_results if item.wildcard_suspected]
 
-    _emit("=== Scan complete ===", progress_callback, messages)
+    if cancelled:
+        _emit("=== Scan cancelled ===", progress_callback, messages)
+        _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
+    else:
+        _emit("=== Scan complete ===", progress_callback, messages)
+
     _emit(
-        f"Domains scanned: {len(result.domain_results)}; "
+        f"Domains scanned: {len(result.domain_results)} of {len(domains)}; "
         f"total findings: {total_records}; "
-        f"candidates tested: {total_candidates}",
+        f"candidates tested: {total_candidates}; "
+        f"elapsed: {result.elapsed_seconds:.1f}s",
         progress_callback,
         messages,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -9,6 +10,67 @@ from pathlib import Path
 from typing import Callable, Optional
 
 ProgressCallback = Callable[[str], None]
+
+
+class ScanStatus(str, Enum):
+    """Overall scan run status."""
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+class CancellationToken:
+    """Thread-safe scan cancellation flag."""
+
+    def __init__(self) -> None:
+        self._cancelled = False
+        self._lock = threading.Lock()
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        with self._lock:
+            return self._cancelled
+
+    def reset(self) -> None:
+        with self._lock:
+            self._cancelled = False
+
+
+@dataclass
+class ScanProgressUpdate:
+    """Structured scan progress for GUI display."""
+
+    domain_index: int
+    domain_total: int
+    current_domain: str
+    candidates_tested: int
+    candidates_total: int
+    domains_completed: int
+    elapsed_seconds: float
+    message: str = ""
+
+
+ScanProgressCallback = Callable[[ScanProgressUpdate], None]
+CancelCheck = Callable[[], bool]
+
+
+@dataclass
+class PreflightSummary:
+    """Pre-scan estimate shown to the operator."""
+
+    domain_count: int
+    wordlist_sources: dict[str, int]
+    total_unique_labels: int
+    estimated_candidates_per_domain: int
+    estimated_total_candidates: int
+    axfr_enabled: bool
+    auth_ns_enabled: bool
+    warning_level: str
 
 
 class RecordType(str, Enum):
@@ -110,3 +172,11 @@ class ScanRunResult:
     status_messages: list[str] = field(default_factory=list)
     wordlist_plan: Optional[WordlistPlan] = None
     scan_timestamp: Optional[datetime] = None
+    scan_status: ScanStatus = ScanStatus.COMPLETED
+    partial: bool = False
+    cancelled: bool = False
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
+    elapsed_seconds: Optional[float] = None
+    domains_total: int = 0
+    domains_planned: list[str] = field(default_factory=list)

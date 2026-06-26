@@ -19,6 +19,7 @@ from scanner.models import (
     DomainScanResult,
     FindingClassification,
     ScanRunResult,
+    ScanStatus,
 )
 from scanner.scan_engine import (
     CANDIDATE_STRONG_WARN_THRESHOLD,
@@ -37,6 +38,10 @@ OPERATOR_NOTE = (
 DISCOVERY_LIMITATION = (
     "DNS discovery results show only records found through the tested methods. "
     "No records discovered does not prove that no subdelegations or DNS records exist."
+)
+
+PARTIAL_SCAN_NOTE = (
+    "This scan was cancelled before all domains were completed. Results are partial."
 )
 
 CSV_COLUMNS = [
@@ -129,6 +134,16 @@ def _findings_report_stem(scan_timestamp: datetime | None) -> str:
 def _workbook_report_stem(scan_timestamp: datetime | None) -> str:
     stamp = scan_timestamp or datetime.now()
     return f"us_locality_dns_report_{stamp.strftime('%Y%m%d_%H%M%S')}"
+
+
+def _export_notes(result: ScanRunResult) -> str:
+    if result.partial or result.cancelled:
+        return f"{DISCOVERY_LIMITATION} {PARTIAL_SCAN_NOTE}"
+    return DISCOVERY_LIMITATION
+
+
+def _limitation_note(result: ScanRunResult) -> str:
+    return _export_notes(result)
 
 
 def _wordlist_sources_text(result: ScanRunResult) -> str:
@@ -337,7 +352,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
     scan_timestamp = _format_timestamp(result.scan_timestamp)
     wordlist_sources = _wordlist_sources_text(result)
     axfr_enabled = result.input.options.attempt_axfr
-    notes = DISCOVERY_LIMITATION
+    notes = _export_notes(result)
 
     for domain_result in result.domain_results:
         axfr_status = _domain_axfr_status(domain_result, axfr_enabled)
@@ -414,7 +429,7 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "candidate_names_tested": str(counts["candidates_tested"]),
                 "wordlist_sources": wordlist_sources,
                 "evidence_summary": _evidence_summary(domain_result, counts),
-                "limitation_note": DISCOVERY_LIMITATION,
+                "limitation_note": _limitation_note(result),
             }
         )
 
@@ -431,6 +446,11 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("app_name", APP_NAME),
         ("scan_timestamp", _format_timestamp(result.scan_timestamp)),
         ("domains_scanned", str(len(result.domain_results))),
+        ("domains_planned", str(result.domains_total or len(result.domains_planned))),
+        ("scan_completed", str(result.scan_status == ScanStatus.COMPLETED).lower()),
+        ("scan_cancelled", str(result.cancelled).lower()),
+        ("partial_results", str(result.partial).lower()),
+        ("elapsed_seconds", "" if result.elapsed_seconds is None else f"{result.elapsed_seconds:.1f}"),
         ("selected_wordlist_sources", _wordlist_sources_text(result)),
         ("label_count_by_source", json.dumps(label_counts)),
         ("total_unique_labels", str(plan.total_unique_labels if plan else 0)),
@@ -441,6 +461,7 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("dns_timeout", str(DNS_TIMEOUT)),
         ("dns_lifetime", str(DNS_LIFETIME)),
         ("discovery_limitation", DISCOVERY_LIMITATION),
+        ("partial_scan_note", PARTIAL_SCAN_NOTE if result.partial or result.cancelled else ""),
         ("operator_note", OPERATOR_NOTE),
     ]
     return rows
@@ -452,6 +473,20 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
     scan_timestamp = _format_timestamp(result.scan_timestamp)
     axfr_enabled = result.input.options.attempt_axfr
     plan = result.wordlist_plan
+
+    if result.partial or result.cancelled:
+        rows.append(
+            {
+                "scan_timestamp": scan_timestamp,
+                "base_domain": "",
+                "warning_type": "scan_cancelled",
+                "tested_name": "",
+                "record_type": "",
+                "nameserver": "",
+                "message": PARTIAL_SCAN_NOTE,
+                "notes": _export_notes(result),
+            }
+        )
 
     if plan and plan.estimated_candidates_per_domain > CANDIDATE_STRONG_WARN_THRESHOLD:
         rows.append(
@@ -602,7 +637,12 @@ def build_json_document(result: ScanRunResult) -> dict:
         "estimated_candidates_per_domain": plan.estimated_candidates_per_domain if plan else 0,
         "axfr_enabled": result.input.options.attempt_axfr,
         "authoritative_query_enabled": result.input.options.query_authoritative_ns,
+        "scan_completed": result.scan_status == ScanStatus.COMPLETED,
+        "scan_cancelled": result.cancelled,
+        "partial_results": result.partial,
+        "elapsed_seconds": result.elapsed_seconds,
         "discovery_limitation": DISCOVERY_LIMITATION,
+        "partial_scan_note": PARTIAL_SCAN_NOTE if result.partial or result.cancelled else "",
     }
 
     domains: list[dict] = []
