@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from scanner.export_service import export_results
 from scanner.models import ScanInput, ScanOptions, ScanRunResult
 from scanner.scan_engine import run_scan, validate_domain_file, validate_wordlist_file
 
@@ -258,8 +259,12 @@ class DiscoveryApp(tk.Tk):
         self._log(f"  Query authoritative NS: {options.query_authoritative_ns}")
 
     def _set_scan_running(self, running: bool) -> None:
-        state = tk.DISABLED if running else tk.NORMAL
-        self.run_button.configure(state=state)
+        self.run_button.configure(state=tk.DISABLED if running else tk.NORMAL)
+        if running:
+            self.export_button.configure(state=tk.DISABLED)
+
+    def _set_export_enabled(self, enabled: bool) -> None:
+        self.export_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
     def _on_run_scan(self) -> None:
         if self._scan_thread and self._scan_thread.is_alive():
@@ -299,18 +304,75 @@ class DiscoveryApp(tk.Tk):
     def _on_scan_complete(self, result: ScanRunResult) -> None:
         self._last_scan_result = result
         self._set_scan_running(False)
-        self._log("Export is not available until a future ticket implements results output.")
+        if result.domain_results:
+            self._set_export_enabled(True)
+            self._log("Scan complete. Export Results is now available.")
+        else:
+            self._set_export_enabled(False)
+            self._log("Scan finished with no domain results to export.")
 
     def _on_scan_error(self, exc: Exception) -> None:
         self._set_scan_running(False)
         self._log(f"Scan failed: {exc.__class__.__name__}: {exc}")
         messagebox.showerror("Scan error", f"The scan encountered an error:\n{exc}")
 
+    def _prompt_export_format(self) -> str | None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Export Results")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        choice: dict[str, str | None] = {"value": None}
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Choose export format:").pack(anchor=tk.W, pady=(0, 10))
+
+        def select(value: str) -> None:
+            choice["value"] = value
+            dialog.destroy()
+
+        ttk.Button(frame, text="CSV", command=lambda: select("csv")).pack(fill=tk.X, pady=2)
+        ttk.Button(frame, text="JSON", command=lambda: select("json")).pack(fill=tk.X, pady=2)
+        ttk.Button(frame, text="Both", command=lambda: select("both")).pack(fill=tk.X, pady=2)
+        ttk.Button(frame, text="Cancel", command=dialog.destroy).pack(fill=tk.X, pady=(8, 0))
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        dialog.geometry(f"+{self.winfo_rootx() + 80}+{self.winfo_rooty() + 80}")
+        self.wait_window(dialog)
+        return choice["value"]
+
     def _on_export_results(self) -> None:
-        messagebox.showinfo(
-            "Export not available",
-            "Export Results is not implemented yet.",
-        )
+        if not self._last_scan_result or not self._last_scan_result.domain_results:
+            messagebox.showwarning("Nothing to export", "Run a scan before exporting results.")
+            return
+
+        export_format = self._prompt_export_format()
+        if not export_format:
+            self._log("Export cancelled.")
+            return
+
+        try:
+            outcome = export_results(self._last_scan_result, OUTPUT_DIR, export_format)
+        except OSError as exc:
+            self._log(f"Export failed: {exc}")
+            messagebox.showerror("Export failed", f"Could not write export files:\n{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Export failed: {exc.__class__.__name__}: {exc}")
+            messagebox.showerror("Export failed", f"An unexpected export error occurred:\n{exc}")
+            return
+
+        self._log("Export complete:")
+        if outcome.csv_path:
+            self._log(f"  CSV: {outcome.csv_path}")
+        if outcome.json_path:
+            self._log(f"  JSON: {outcome.json_path}")
+        self._log(f"  Rows exported: {outcome.row_count}")
+        self._log(f"  Domains scanned: {outcome.domain_count}")
 
 
 def main() -> None:

@@ -1,5 +1,13 @@
 """Scanner package for US locality DNS discovery."""
 
+from scanner.export_service import (
+    CSV_COLUMNS,
+    DISCOVERY_LIMITATION,
+    ExportOutcome,
+    export_csv,
+    export_json,
+    export_results,
+)
 from scanner.models import (
     DiscoveredRecord,
     DomainScanResult,
@@ -19,8 +27,11 @@ from scanner.scan_engine import (
 )
 
 __all__ = [
+    "CSV_COLUMNS",
+    "DISCOVERY_LIMITATION",
     "DiscoveredRecord",
     "DomainScanResult",
+    "ExportOutcome",
     "FindingClassification",
     "ProgressCallback",
     "RecordType",
@@ -29,6 +40,9 @@ __all__ = [
     "ScanRunResult",
     "WordlistPlan",
     "build_wordlist_plan",
+    "export_csv",
+    "export_json",
+    "export_results",
     "run_scan",
     "validate_domain_file",
     "validate_wordlist_file",

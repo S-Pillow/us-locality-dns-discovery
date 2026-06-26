@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import dns.exception
@@ -310,6 +311,7 @@ def _query_records(
     for record_type in record_types:
         try:
             answers = resolver.resolve(qname, record_type.value)
+            ttl = answers.rrset.ttl if answers.rrset is not None else None
             for rdata in answers:
                 findings.append(
                     DiscoveredRecord(
@@ -320,6 +322,7 @@ def _query_records(
                         classification=classification,
                         confidence=confidence,
                         nameserver=nameserver,
+                        ttl=ttl,
                     )
                 )
         except dns.resolver.NXDOMAIN:
@@ -392,6 +395,7 @@ def _attempt_axfr(base_domain: str, ns_host: str, ns_ip: str) -> tuple[list[Disc
                             source_method="axfr",
                             classification=FindingClassification.AXFR_SUCCESS,
                             nameserver=f"{ns_host} ({ns_ip})",
+                            ttl=rdataset.ttl,
                         )
                     )
         return findings, f"AXFR succeeded via {ns_host} ({ns_ip}) — {len(findings)} record(s) discovered"
@@ -597,7 +601,7 @@ def scan_domain(
             candidate,
             (RecordType.NS,),
             resolver,
-            source_method="recursive_resolver",
+            source_method="generated_candidate",
             classification=FindingClassification.POSSIBLE_SUBDELEGATION,
         )
         if ns_findings:
@@ -617,7 +621,7 @@ def scan_domain(
             candidate,
             CANDIDATE_RECORD_TYPES,
             resolver,
-            source_method="recursive_resolver",
+            source_method="generated_candidate",
             classification=FindingClassification.STANDARD_RECORD,
         )
         for item in other_findings:
@@ -666,7 +670,7 @@ def run_scan(
     progress_callback: ProgressCallback | None = None,
 ) -> ScanRunResult:
     """Run DNS discovery for all domains in the input file."""
-    result = ScanRunResult(input=scan_input)
+    result = ScanRunResult(input=scan_input, scan_timestamp=datetime.now())
     messages = result.status_messages
 
     _emit("Starting DNS discovery scan.", progress_callback, messages)

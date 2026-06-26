@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
@@ -86,6 +87,7 @@ class DiscoveredRecord:
     classification: FindingClassification
     confidence: str = "normal"
     nameserver: Optional[str] = None
+    ttl: Optional[int] = None
 
 
 @dataclass
@@ -107,3 +109,4 @@ class ScanRunResult:
     domain_results: list[DomainScanResult] = field(default_factory=list)
     status_messages: list[str] = field(default_factory=list)
     wordlist_plan: Optional[WordlistPlan] = None
+    scan_timestamp: Optional[datetime] = None

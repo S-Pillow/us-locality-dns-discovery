@@ -17,7 +17,7 @@ What works today:
 - Candidate-count warnings when estimates exceed 250 or 500 names per domain
 - Real DNS discovery for base domains and generated candidate subdomains
 - Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
-- Disabled **Export Results** button (future ticket)
+- **Export Results** to timestamped CSV and JSON reports in `output/` after a completed scan
 
 ## Wordlist sources
 
@@ -70,6 +70,21 @@ For each input domain the tool:
 
 Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging the GUI.
 
+## Exporting results
+
+After a scan completes, **Export Results** becomes enabled. Choose **CSV**, **JSON**, or **Both**. Reports are written to `output/` with timestamped filenames such as:
+
+- `us_locality_dns_discovery_YYYYMMDD_HHMMSS.csv`
+- `us_locality_dns_discovery_YYYYMMDD_HHMMSS.json`
+
+CSV columns document each finding with scan metadata, wordlist sources, wildcard status, and AXFR status. JSON includes `scan_metadata`, per-domain `findings`, `summary_counts`, and `errors`.
+
+Every report includes this discovery limitation:
+
+> DNS discovery results show only records found through the tested methods. No records discovered does not prove that no subdelegations or DNS records exist.
+
+Reports are created only when you click **Export Results** — scans do not auto-write report files.
+
 ## Discovery vs. authoritative truth
 
 **Discovery** means records found through tested methods only.
@@ -88,7 +103,8 @@ us_locality_dns_discovery/
 ├── scanner/
 │   ├── __init__.py
 │   ├── models.py
-│   └── scan_engine.py
+│   ├── scan_engine.py
+│   └── export_service.py
 ├── wordlists/
 │   ├── rfc1480.txt
 │   ├── dns_common.txt
@@ -104,7 +120,6 @@ us_locality_dns_discovery/
 
 ## Out of scope (future tickets)
 
-- CSV/JSON export
 - PyInstaller packaging
 - Web UI, authentication, database, or cloud hosting
 - External OSINT tools (Amass, dnsx, subfinder, etc.)
