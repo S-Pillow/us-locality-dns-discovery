@@ -203,6 +203,9 @@ SCAN_ERROR_NOTE = "Domain status is incomplete/error; rerun recommended."
 SOA_FINDING_NOTE = (
     "SOA discovered; zone exists even though requested record type may have no direct answer."
 )
+FIFTH_LEVEL_PARENT_NOTE = (
+    "Parent checked because 5th-level candidates were tested under this name."
+)
 
 CSV_COLUMNS = [
     "scan_timestamp",
@@ -653,6 +656,17 @@ def _why_for_child_name(
     ctx: DnsEvidenceContext,
     record: DiscoveredRecord | None = None,
 ) -> str:
+    if record is not None and record.source_method == "fifth_level_parent_validation":
+        if known_domain:
+            return (
+                "Tool confirmed a 4th-level domain already listed in the system input "
+                "while checking deeper candidate names."
+            )
+        return (
+            "Tool found direct DNS evidence for this 4th-level child domain while checking "
+            "deeper candidate names."
+        )
+
     if name_type == "base_domain":
         if evidence_value == "context_only":
             return "Only base-domain DNS evidence was found; no child domains were discovered by tested methods."
@@ -1323,6 +1337,7 @@ def _map_source(record: DiscoveredRecord) -> str:
         "axfr": "axfr",
         "wildcard_probe": "wildcard_probe",
         "generated_candidate": "generated_candidate",
+        "fifth_level_parent_validation": "5th-level parent check",
     }
     return mapping.get(record.source_method, record.source_method)
 
@@ -1515,6 +1530,8 @@ def _record_error(record: DiscoveredRecord) -> str:
 
 
 def _finding_notes(record: DiscoveredRecord, base_notes: str) -> str:
+    if record.source_method == "fifth_level_parent_validation":
+        return f"{FIFTH_LEVEL_PARENT_NOTE} {base_notes}".strip()
     if record.classification in {
         FindingClassification.BASE_ZONE_EXISTS,
         FindingClassification.ZONE_SOA_DISCOVERED,
@@ -1866,6 +1883,26 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("custom_wordlist_used", str(options.include_custom_wordlist).lower()),
         ("dns_timeout", str(DNS_TIMEOUT)),
         ("dns_lifetime", str(DNS_LIFETIME)),
+        (
+            "fifth_level_parent_validation",
+            str(
+                bool(
+                    plan
+                    and (
+                        plan.fifth_level_enabled
+                        or plan.known_fifth_level_candidates > 0
+                    )
+                )
+            ).lower(),
+        ),
+        (
+            "fifth_level_parent_validation_note",
+            (
+                "Parent 4th-level names are checked once when deeper candidate names are tested."
+                if plan and (plan.fifth_level_enabled or plan.known_fifth_level_candidates > 0)
+                else ""
+            ),
+        ),
         ("discovery_limitation", DISCOVERY_LIMITATION),
         ("context_limitation", CONTEXT_LIMITATION),
         ("partial_scan_note", PARTIAL_SCAN_NOTE if result.partial or result.cancelled else ""),

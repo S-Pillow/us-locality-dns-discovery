@@ -68,6 +68,7 @@ CANDIDATE_RECORD_TYPES = (
 )
 
 FIFTH_LEVEL_BRANCHES = ("ci", "co")
+FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
 WILDCARD_PROBE_COUNT = 2
 LOW_CONFIDENCE_TYPES = {RecordType.A, RecordType.AAAA, RecordType.CNAME}
 SOA_AUTHORITY_NOTE = (
@@ -580,6 +581,120 @@ def generate_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
     """Build all candidate FQDNs (legacy helper)."""
     fourth, fifth = generate_all_candidates(base_domain, plan)
     return list(dict.fromkeys(fourth + fifth))
+
+
+def _implied_fourth_level_parent(candidate: str, base_domain: str) -> str | None:
+    """Return the 4th-level parent implied by a 5th-level candidate name."""
+    child = _display_name(candidate)
+    base = _display_name(base_domain)
+    if not child.endswith(f".{base}"):
+        return None
+    relative = child[: -(len(base) + 1)]
+    parts = relative.split(".")
+    if len(parts) < 2:
+        return None
+    parent_relative = ".".join(parts[1:])
+    return f"{parent_relative}.{base}"
+
+
+def _unique_fifth_level_parents(candidates: list[str], base_domain: str) -> set[str]:
+    parents: set[str] = set()
+    for candidate in candidates:
+        parent = _implied_fourth_level_parent(candidate, base_domain)
+        if parent:
+            parents.add(_display_name(parent))
+    return parents
+
+
+def _name_has_usable_findings(fqdn: str, result: DomainScanResult) -> bool:
+    """True when the scan already has direct DNS evidence for fqdn."""
+    for record in result.records:
+        if not _names_match(record.fqdn, fqdn):
+            continue
+        if record.classification in {
+            FindingClassification.QUERY_ERROR,
+            FindingClassification.SCAN_ERROR,
+            FindingClassification.AXFR_BLOCKED,
+            FindingClassification.NO_RECORDS_DISCOVERED,
+            FindingClassification.AUTHORITATIVE_NS,
+        }:
+            continue
+        if record.classification in {
+            FindingClassification.BASE_DOMAIN_RECORD,
+            FindingClassification.BASE_ZONE_EXISTS,
+        }:
+            continue
+        return True
+    return False
+
+
+def _validate_fourth_level_parent(
+    parent: str,
+    *,
+    domain: str,
+    resolver: dns.resolver.Resolver,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    progress: ProgressCallback | None,
+    messages: list[str],
+) -> bool:
+    """Directly test an implied 4th-level parent; return True if usable findings were added."""
+    added_records = 0
+    ns_findings, ns_errors = _query_records(
+        parent,
+        (RecordType.NS,),
+        resolver,
+        source_method=FIFTH_LEVEL_PARENT_SOURCE,
+        classification=FindingClassification.DELEGATED_CHILD_ZONE,
+        base_domain=domain,
+    )
+    if ns_findings:
+        for item in ns_findings:
+            item.confidence = _confidence_for(
+                wildcard_suspected, item.record_type, item.classification
+            )
+            result.records.append(item)
+            added_records += 1
+        _emit(
+            f"    4th-level parent: {parent} NS "
+            f"{', '.join(item.value for item in ns_findings)}",
+            progress,
+            messages,
+        )
+
+    other_findings, parent_errors = _query_records(
+        parent,
+        CANDIDATE_RECORD_TYPES,
+        resolver,
+        source_method=FIFTH_LEVEL_PARENT_SOURCE,
+        classification=FindingClassification.STANDARD_RECORD,
+        base_domain=domain,
+    )
+    for item in other_findings:
+        item.confidence = _confidence_for(
+            wildcard_suspected, item.record_type, item.classification
+        )
+        result.records.append(item)
+        added_records += 1
+
+    for error in ns_errors + parent_errors:
+        result.records.append(
+            DiscoveredRecord(
+                fqdn=parent,
+                record_type=None,
+                value=error,
+                source_method=FIFTH_LEVEL_PARENT_SOURCE,
+                classification=FindingClassification.QUERY_ERROR,
+            )
+        )
+
+    if added_records:
+        _emit(
+            f"    4th-level parent validated: {parent} ({added_records} direct record(s))",
+            progress,
+            messages,
+        )
+    return added_records > 0
 
 
 def _make_resolver(nameserver: str | None = None) -> dns.resolver.Resolver:
@@ -1105,6 +1220,8 @@ def _test_candidates(
     phase: ScanPhase,
     candidates_offset: int,
     candidates_total: int,
+    validate_fifth_level_parents: bool = False,
+    parent_validation_cache: set[str] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     subdelegation_count = 0
@@ -1146,6 +1263,23 @@ def _test_candidates(
                     ),
                     candidates_started=True,
                 )
+
+            if validate_fifth_level_parents and parent_validation_cache is not None:
+                parent = _implied_fourth_level_parent(candidate, domain)
+                if parent:
+                    parent_key = _display_name(parent)
+                    if parent_key not in parent_validation_cache:
+                        parent_validation_cache.add(parent_key)
+                        if not _name_has_usable_findings(parent, result):
+                            _validate_fourth_level_parent(
+                                parent,
+                                domain=domain,
+                                resolver=resolver,
+                                result=result,
+                                wildcard_suspected=wildcard_suspected,
+                                progress=progress,
+                                messages=messages,
+                            )
 
             ns_findings, ns_candidate_errors = _query_records(
                 candidate,
@@ -1533,6 +1667,18 @@ def scan_domain(
 
     fifth_tested = 0
     if fifth_candidates and not (cancel_check and cancel_check()):
+        fifth_parents = _unique_fifth_level_parents(fifth_candidates, domain)
+        fourth_tested_names = {_display_name(name) for name in fourth_candidates}
+        additional_parent_checks = len(fifth_parents - fourth_tested_names)
+        _emit(
+            "  5th-level parent validation: enabled "
+            f"({len(fifth_parents)} unique parent name(s); "
+            f"{additional_parent_checks} additional direct check(s) beyond 4th-level candidates). "
+            "Parent names are checked once when deeper candidate names are tested.",
+            progress,
+            messages,
+        )
+        parent_validation_cache: set[str] = set(fourth_tested_names)
         _emit_progress(
             progress_update,
             domain_index=domain_index,
@@ -1563,6 +1709,8 @@ def scan_domain(
             phase=ScanPhase.TESTING_FIFTH_LEVEL,
             candidates_offset=fourth_tested,
             candidates_total=candidate_total,
+            validate_fifth_level_parents=True,
+            parent_validation_cache=parent_validation_cache,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested
