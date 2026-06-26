@@ -15,6 +15,7 @@ from scanner.paths import get_app_base_dir, get_output_dir, get_wordlists_dir
 from scanner.input_loader import load_domain_inputs
 from scanner.scan_engine import (
     build_preflight_summary,
+    preflight_scan_guidance,
     run_scan,
     validate_domain_input,
     validate_domain_file,
@@ -308,6 +309,7 @@ class DiscoveryApp(tk.Tk):
             duplicate_line = (
                 f"  Duplicate domains removed: {summary.duplicate_domains_removed}\n"
             )
+        size_level, size_guidance = preflight_scan_guidance(summary.estimated_total_candidates)
         self.preflight_var.set(
             "Preflight estimate (discovery-based; not a complete inventory):\n"
             f"  Domains loaded: {summary.domain_count}\n"
@@ -318,9 +320,12 @@ class DiscoveryApp(tk.Tk):
             f"  Total unique candidate labels: {summary.total_unique_labels}\n"
             f"  Estimated candidate names per domain: {summary.estimated_candidates_per_domain}\n"
             f"  Estimated total candidate names: {summary.estimated_total_candidates:,}\n"
+            f"  Scan size: {size_level}\n"
+            f"  Guidance: {size_guidance}\n"
+            f"  Evidence sampling tip: use a small targeted sample (10–25 domains), not the full ~2,000-domain list.\n"
+            f"  Review focus: strong/moderate evidence_support_level rows in the Evidence Review sheet.\n"
             f"  AXFR enabled: {'yes' if summary.axfr_enabled else 'no'}\n"
-            f"  Authoritative NS querying enabled: {'yes' if summary.auth_ns_enabled else 'no'}\n"
-            f"  Warning level: {summary.warning_level}"
+            f"  Authoritative NS querying enabled: {'yes' if summary.auth_ns_enabled else 'no'}"
         )
 
     def _confirm_scan_start(self, total_candidates: int) -> bool:

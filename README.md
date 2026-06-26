@@ -74,7 +74,43 @@ Plan smaller batches for deeper wordlist coverage. For a full locality list (~15
 | **Normal evidence scan** | 10–25 | RFC/locality baseline + Common DNS/web labels + Civic departments |
 | **Deep scan** | 3–10 | Add Public services, Schools/libraries, Delegated-manager clues, and/or a custom wordlist |
 
-Higher candidate counts mean longer run times. The preflight summary shows estimated candidates per domain and a warning level (`low`, `moderate`, `large`, `very large`). Confirm before starting when totals reach 10,000+ or 50,000+ candidates.
+Higher candidate counts mean longer run times. The preflight summary shows estimated candidates per domain and a scan-size label (`small`, `moderate`, `large`, `very large`) with operator guidance. Confirm before starting when totals reach 10,000+ or 50,000+ candidates.
+
+## Recommended Evidence Workflow
+
+Use this workflow for coworker-ready visibility-gap evidence from a **small targeted sample**, not the full ~2,000-domain list:
+
+1. Start with a **small enriched CSV sample** exported from your spreadsheet (not the full list).
+2. Prefer **10–25 actual externally managed 3rd-level domains** for the first run.
+3. Include a **mix of Delegated Managers** when possible.
+4. Use **normal evidence settings**:
+   - RFC/locality baseline **ON**
+   - Common DNS/web labels **ON**
+   - Civic departments **ON** for locality/government domains
+   - Schools/libraries **ON** only for school/K12-related domains
+   - AXFR **ON**
+   - Authoritative NS querying **ON**
+5. Export **XLSX** after the scan completes or is cancelled with partial results.
+6. Open the **Evidence Review** sheet first (rows are sorted strong → moderate → limited → inconclusive → none).
+7. Sort or filter by `evidence_support_level` if you need to re-prioritize within Summary.
+8. Manually verify a few **strong/moderate** rows using the `manual_verification_hint` dig commands.
+9. **Rerun inconclusive/error rows** before drawing conclusions.
+10. Word conclusions carefully:
+    - The scan can support that DNS activity may exist outside registry/locality portal visibility.
+    - The scan does **not** provide complete zone enumeration.
+    - **No records discovered** does not prove absence.
+
+## Performance and safety
+
+- **You do not need to scan all ~2,000 domains** for this evidence task. A small sample with strong examples is enough.
+- **Large scans take a long time** because DNS queries run sequentially with conservative timeouts.
+- **Suggested batch sizes for evidence work:**
+  - **10–25 domains** — normal evidence batches (recommended starting point)
+  - **5–10 domains** — deep targeted batches with more wordlist sources
+  - **25–50 domains** — light settings only (RFC baseline + maybe Common DNS)
+- **Cancel Scan** preserves partial results; export them if at least one domain completed.
+- **Scan errors** (`Scan incomplete / error`) should be **rerun** before conclusions.
+- **AXFR refused/blocked/timeout** is normal and is **not** a scan failure by itself.
 
 ## How to choose wordlist sources
 
@@ -228,9 +264,10 @@ Reports are written to the [output folder for your mode](#where-reports-are-save
 
 | Sheet | Purpose |
 |-------|---------|
-| **Summary** | **Start here.** One row per base domain with input metadata (`input_domain`, `delegated_manager`, `zone`, known 4th/5th-level fields), `scan_status`, DNS evidence counts, `evidence_summary`, and `analysis_note` connecting input context to findings. |
-| **Findings** | Detailed rows for each discovered record, candidate test, or notable outcome (same columns as findings CSV). Use after Summary to inspect individual DNS evidence. |
-| **Scan Settings** | Scan metadata, input file type (`txt` / `simple_csv` / `enriched_csv`), detected metadata columns, wordlist sources, DNS timeouts, completion/cancellation flags, and limitation notes. |
+| **Summary** | Full per-domain rollup with input metadata, DNS evidence counts, comparison fields, `evidence_support_level`, `recommended_review_action`, and `manual_verification_hint`. |
+| **Evidence Review** | **Open this first for coworker review.** Short prioritized view (strong → moderate → limited → inconclusive → none) with review actions and dig hints. |
+| **Findings** | Detailed rows for each discovered record, candidate test, or notable outcome (same columns as findings CSV). |
+| **Scan Settings** | Scan metadata, input file type, detected metadata columns, limitation notes, and recommended review path. |
 | **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
 
 Summary `scan_status` values use discovery-based wording such as *Possible delegated child zone discovered*, *DNS activity discovered*, *DNS activity discovered with scan errors*, *Base domain zone exists*, *Base domain records only*, *Scan incomplete / error*, *Scan errors only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
@@ -281,7 +318,7 @@ Before starting, the **Preflight Summary** shows:
 - Selected wordlist sources
 - Estimated candidate names per domain and total
 - AXFR / authoritative NS settings
-- Warning level: `low`, `moderate`, `large`, or `very large`
+- Scan size: `small`, `moderate`, `large`, or `very large`
 
 Confirmation is required when the estimated total candidate names is **10,000+** (large) or **50,000+** (very large). For example, ~157 domains with default wordlists (~428 candidates each) is about **67,000** total candidates and triggers the very-large warning.
 

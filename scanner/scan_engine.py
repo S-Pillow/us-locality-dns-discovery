@@ -219,7 +219,21 @@ def compute_warning_level(total_candidates: int) -> str:
         return "large"
     if total_candidates >= 1_000:
         return "moderate"
-    return "low"
+    return "small"
+
+
+def preflight_scan_guidance(total_candidates: int) -> tuple[str, str]:
+    """Return scan-size label and operator guidance for preflight display."""
+    level = compute_warning_level(total_candidates)
+    messages = {
+        "small": "Small scan. Good for quick validation.",
+        "moderate": "Moderate scan. Good for pilot evidence batches.",
+        "large": "Large scan. Consider splitting into smaller batches.",
+        "very large": (
+            "Very large scan. Not recommended for evidence sampling unless intentionally planned."
+        ),
+    }
+    return level, messages[level]
 
 
 def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:

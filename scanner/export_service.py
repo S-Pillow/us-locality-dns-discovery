@@ -37,6 +37,44 @@ OPERATOR_NOTE = (
     "It is not an authoritative zone inventory."
 )
 
+REVIEW_PATH_NOTE = (
+    "Recommended review path: open Evidence Review first, filter for strong/moderate "
+    "evidence_support_level, manually verify selected rows with dig, and treat "
+    "inconclusive/error rows as rerun candidates."
+)
+
+EVIDENCE_SUPPORT_ORDER = {
+    "strong": 0,
+    "moderate": 1,
+    "limited": 2,
+    "inconclusive": 3,
+    "none": 4,
+}
+
+RECOMMENDED_REVIEW_ACTIONS = {
+    "strong": "Strong example candidate — manually verify",
+    "moderate": "Moderate example candidate — review DNS names",
+    "limited": "Limited support — base zone or known-child evidence only",
+    "inconclusive": "Rerun before conclusion",
+    "none": "No action / no evidence found",
+}
+
+EVIDENCE_REVIEW_COLUMNS = [
+    "base_domain",
+    "delegated_manager",
+    "zone",
+    "evidence_support_level",
+    "recommended_review_action",
+    "known_child_domains_from_input",
+    "dns_discovered_child_names_not_in_input",
+    "delegated_child_zones_not_in_input",
+    "base_zone_exists",
+    "scan_status",
+    "analysis_note",
+    "manual_verification_hint",
+    "limitation_note",
+]
+
 DISCOVERY_LIMITATION = (
     "DNS discovery results show only records found through the tested methods. "
     "No records discovered does not prove that no subdelegations or DNS records exist."
@@ -90,7 +128,6 @@ SUMMARY_COLUMNS = [
     "known_fourth_level_count",
     "known_fifth_level_count",
     "known_fourth_level_domains",
-    "known_fourth_level_domains",
     "known_fifth_level_domains",
     "known_child_domains_from_input",
     "known_child_domains_from_input_count",
@@ -103,6 +140,8 @@ SUMMARY_COLUMNS = [
     "delegated_child_zones_not_in_input",
     "delegated_child_zones_not_in_input_count",
     "evidence_support_level",
+    "recommended_review_action",
+    "manual_verification_hint",
     "scan_status",
     "authoritative_nameservers",
     "axfr_status",
@@ -425,6 +464,63 @@ def _analysis_note(
         return "DNS activity was found only on child domains already listed in the input."
 
     return "No records discovered using selected methods; this does not prove absence."
+
+
+def _recommended_review_action(evidence_support_level: str) -> str:
+    return RECOMMENDED_REVIEW_ACTIONS.get(
+        evidence_support_level,
+        "No action / no evidence found",
+    )
+
+
+def _parse_domain_list(value: str) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(";") if part.strip()]
+
+
+def _manual_verification_hint(
+    domain_result: DomainScanResult,
+    counts: dict[str, int],
+    scan_status: str,
+    comparison: dict[str, str | int | bool],
+    evidence_support_level: str,
+) -> str:
+    if evidence_support_level == "inconclusive" or _domain_has_scan_error(domain_result):
+        return "Rerun domain before drawing conclusions."
+
+    if evidence_support_level == "none":
+        return "No manual verification target from this scan."
+
+    base = domain_result.domain
+    delegated_not_in = comparison.get("_delegated_not_in_input_set", set())
+    dns_not_in = comparison.get("_discovered_set", set()) - comparison.get("_known_set", set())
+    if isinstance(delegated_not_in, str):
+        delegated_not_in = set(_parse_domain_list(str(comparison.get("delegated_child_zones_not_in_input", ""))))
+    if not isinstance(dns_not_in, set):
+        dns_not_in = set(
+            _parse_domain_list(str(comparison.get("dns_discovered_child_names_not_in_input", "")))
+        )
+
+    if counts["axfr_success"] > 0 or scan_status == SCAN_STATUS_AXFR:
+        return f"Review AXFR output if AXFR succeeded. Verify base zone with: dig SOA {base}; dig NS {base}"
+
+    if evidence_support_level in {"strong", "moderate"} and delegated_not_in:
+        child = sorted(delegated_not_in)[0]
+        return f"Verify delegated child with: dig NS {child}"
+
+    if evidence_support_level in {"strong", "moderate"} and dns_not_in:
+        sample = sorted(dns_not_in)[:2]
+        commands: list[str] = []
+        for name in sample:
+            commands.append(f"dig A {name}")
+            commands.append(f"dig CNAME {name}")
+        return f"Verify DNS activity with: {'; '.join(commands[:4])}"
+
+    if evidence_support_level == "limited" or counts["base_zone_exists_flag"]:
+        return f"Verify base zone with: dig SOA {base}; dig NS {base}"
+
+    return "No manual verification target from this scan."
 
 
 def _wordlist_sources_text(result: ScanRunResult) -> str:
@@ -880,14 +976,23 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
             for key, value in comparison.items()
             if not key.startswith("_")
         }
+        evidence_level = _evidence_support_level(
+            domain_result, counts, scan_status, comparison
+        )
         rows.append(
             {
                 "scan_timestamp": scan_timestamp,
                 "base_domain": domain_result.domain,
                 **metadata,
                 **comparison_export,
-                "evidence_support_level": _evidence_support_level(
-                    domain_result, counts, scan_status, comparison
+                "evidence_support_level": evidence_level,
+                "recommended_review_action": _recommended_review_action(evidence_level),
+                "manual_verification_hint": _manual_verification_hint(
+                    domain_result,
+                    counts,
+                    scan_status,
+                    comparison,
+                    evidence_level,
                 ),
                 "scan_status": scan_status,
                 "authoritative_nameservers": "; ".join(_authoritative_nameservers(domain_result)),
@@ -907,6 +1012,19 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
         )
 
     return rows
+
+
+def build_evidence_review_rows(result: ScanRunResult) -> list[dict[str, str]]:
+    """Build coworker-ready evidence review rows sorted by support level."""
+    summary_rows = build_summary_rows(result)
+    review_rows = [
+        {column: row.get(column, "") for column in EVIDENCE_REVIEW_COLUMNS}
+        for row in summary_rows
+    ]
+    review_rows.sort(
+        key=lambda row: EVIDENCE_SUPPORT_ORDER.get(row.get("evidence_support_level", "none"), 99)
+    )
+    return review_rows
 
 
 def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
@@ -946,6 +1064,7 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("context_limitation", CONTEXT_LIMITATION),
         ("partial_scan_note", PARTIAL_SCAN_NOTE if result.partial or result.cancelled else ""),
         ("operator_note", OPERATOR_NOTE),
+        ("review_path_note", REVIEW_PATH_NOTE),
     ]
     return rows
 
@@ -1222,6 +1341,9 @@ def build_json_document(result: ScanRunResult) -> dict:
             for key, value in comparison.items()
             if not key.startswith("_")
         }
+        evidence_level = _evidence_support_level(
+            domain_result, counts, scan_status, comparison
+        )
 
         domains.append(
             {
@@ -1230,8 +1352,14 @@ def build_json_document(result: ScanRunResult) -> dict:
                 "delegated_manager": _input_metadata_values(domain_result)["delegated_manager"] or None,
                 "zone": _input_metadata_values(domain_result)["zone"] or None,
                 "known_vs_dns_comparison": comparison_export,
-                "evidence_support_level": _evidence_support_level(
-                    domain_result, counts, scan_status, comparison
+                "evidence_support_level": evidence_level,
+                "recommended_review_action": _recommended_review_action(evidence_level),
+                "manual_verification_hint": _manual_verification_hint(
+                    domain_result,
+                    counts,
+                    scan_status,
+                    comparison,
+                    evidence_level,
                 ),
                 "analysis_note": _analysis_note(domain_result, counts, scan_status, comparison),
                 "wildcard_suspected": domain_result.wildcard_suspected,
@@ -1319,6 +1447,7 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
             "evidence_summary",
             "analysis_note",
             "limitation_note",
+            "manual_verification_hint",
             "authoritative_nameservers",
             "wordlist_sources",
             "known_fourth_level_domains",
@@ -1331,6 +1460,22 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         },
         status_column="scan_status",
         status_fill_map=SUMMARY_STATUS_FILLS,
+    )
+
+    review_sheet = workbook.create_sheet("Evidence Review")
+    review_rows = build_evidence_review_rows(result)
+    _write_table_sheet(
+        review_sheet,
+        EVIDENCE_REVIEW_COLUMNS,
+        review_rows,
+        wrap_columns={
+            "known_child_domains_from_input",
+            "dns_discovered_child_names_not_in_input",
+            "delegated_child_zones_not_in_input",
+            "analysis_note",
+            "manual_verification_hint",
+            "limitation_note",
+        },
     )
 
     findings_sheet = workbook.create_sheet("Findings")
