@@ -3,12 +3,13 @@
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from scanner.models import ScanInput, ScanOptions
+from scanner.models import ScanInput, ScanOptions, ScanRunResult
 from scanner.scan_engine import run_scan, validate_domain_file, validate_wordlist_file
 
 APP_TITLE = ".US Locality DNS Discovery Tool"
@@ -16,11 +17,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
 WORDLISTS_DIR = PROJECT_ROOT / "wordlists"
 
-ACCEPTED_EXTENSIONS = {".txt", ".csv"}
-
 
 class DiscoveryApp(tk.Tk):
-    """Main Tkinter window for the discovery tool prototype."""
+    """Main Tkinter window for the discovery tool."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -38,10 +37,13 @@ class DiscoveryApp(tk.Tk):
         self.axfr_var = tk.BooleanVar(value=False)
         self.auth_ns_var = tk.BooleanVar(value=True)
 
+        self._scan_thread: threading.Thread | None = None
+        self._last_scan_result: ScanRunResult | None = None
+
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
-        self._log("Ready. This prototype validates inputs only; no DNS lookups are performed.")
+        self._log("Ready. Select a domain list and click Run Scan to begin DNS discovery.")
 
     def _build_ui(self) -> None:
         main = ttk.Frame(self, padding=12)
@@ -65,7 +67,7 @@ class DiscoveryApp(tk.Tk):
             command=self._browse_wordlist_file,
         )
 
-        options_frame = ttk.LabelFrame(main, text="Scan Options (placeholder)", padding=10)
+        options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
         options_frame.pack(fill=tk.X, pady=(0, 10))
 
         option_rows = [
@@ -216,7 +218,15 @@ class DiscoveryApp(tk.Tk):
                 status = "found" if path.is_file() else "missing"
                 self._log(f"  Built-in wordlist {name}: {status}")
 
+    def _set_scan_running(self, running: bool) -> None:
+        state = tk.DISABLED if running else tk.NORMAL
+        self.run_button.configure(state=state)
+
     def _on_run_scan(self) -> None:
+        if self._scan_thread and self._scan_thread.is_alive():
+            self._log("Scan already in progress.")
+            return
+
         self._log("Run Scan requested.")
         valid, domain_path, wordlist_path = self._validate_selected_files()
         if not valid or domain_path is None:
@@ -229,19 +239,38 @@ class DiscoveryApp(tk.Tk):
             domain_file_path=domain_path,
             options=options,
             output_dir=OUTPUT_DIR,
+            wordlists_dir=WORDLISTS_DIR,
         )
 
-        result = run_scan(scan_input)
-        for message in result.status_messages:
-            self._log(message)
+        self._set_scan_running(True)
 
-        self._log("No DNS queries or external network calls were made.")
+        def progress(message: str) -> None:
+            self.after(0, lambda m=message: self._log(m))
+
+        def worker() -> None:
+            try:
+                result = run_scan(scan_input, progress_callback=progress)
+                self.after(0, lambda: self._on_scan_complete(result))
+            except Exception as exc:  # noqa: BLE001
+                self.after(0, lambda: self._on_scan_error(exc))
+
+        self._scan_thread = threading.Thread(target=worker, daemon=True)
+        self._scan_thread.start()
+
+    def _on_scan_complete(self, result: ScanRunResult) -> None:
+        self._last_scan_result = result
+        self._set_scan_running(False)
         self._log("Export is not available until a future ticket implements results output.")
+
+    def _on_scan_error(self, exc: Exception) -> None:
+        self._set_scan_running(False)
+        self._log(f"Scan failed: {exc.__class__.__name__}: {exc}")
+        messagebox.showerror("Scan error", f"The scan encountered an error:\n{exc}")
 
     def _on_export_results(self) -> None:
         messagebox.showinfo(
             "Export not available",
-            "Export Results is not implemented in this ticket.",
+            "Export Results is not implemented yet.",
         )
 
 

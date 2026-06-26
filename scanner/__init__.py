@@ -3,6 +3,8 @@
 from scanner.models import (
     DiscoveredRecord,
     DomainScanResult,
+    FindingClassification,
+    ProgressCallback,
     RecordType,
     ScanInput,
     ScanOptions,
@@ -13,6 +15,8 @@ from scanner.scan_engine import run_scan, validate_domain_file, validate_wordlis
 __all__ = [
     "DiscoveredRecord",
     "DomainScanResult",
+    "FindingClassification",
+    "ProgressCallback",
     "RecordType",
     "ScanInput",
     "ScanOptions",

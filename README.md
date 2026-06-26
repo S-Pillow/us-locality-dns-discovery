@@ -2,18 +2,19 @@
 
 Internal-use **standalone Windows desktop utility** (Python 3.11+) for discovering visible DNS activity and possible 4th/5th-level subdelegations under externally managed `.us` locality 3rd-level domains.
 
-## Current status (prototype scaffold)
+## Current status (working prototype)
 
-This first version is a **UI and project scaffold only**. It does **not** perform live DNS lookups, zone transfers (AXFR), or any external network calls.
+This version includes a **functional DNS discovery scan engine** wired to the Tkinter GUI. It performs controlled DNS lookups using `dnspython` when you click **Run Scan**.
 
 What works today:
 
-- Tkinter desktop GUI
-- Domain list file picker (`.txt` / `.csv`)
+- Tkinter desktop GUI with threaded scan execution (GUI stays responsive)
+- Domain list file picker (`.txt` / `.csv`) with normalization and `#` comment support
 - Optional custom wordlist file picker (`.txt` / `.csv`)
-- Scan option checkboxes (stored for future use)
-- Input validation and status logging
-- Placeholder **Run Scan** flow that reports: *Scan engine not implemented in this ticket.*
+- Scan option checkboxes controlling wordlists, authoritative NS queries, and AXFR attempts
+- Real DNS discovery for base domains and generated candidate subdomains
+- Progress and results logged to the status area
+- Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
 - Disabled **Export Results** button (future ticket)
 
 Built-in wordlists are editable text files under `wordlists/`:
@@ -30,21 +31,25 @@ Requires **Python 3.11+** with Tkinter (included in standard Windows Python inst
 
 ```powershell
 cd us_locality_dns_discovery
+python -m pip install -r requirements.txt
 python app.py
 ```
 
-No third-party packages are required for this ticket. See `requirements.txt` for planned future dependencies (`dnspython`, `PyInstaller`).
+Requires `dnspython` (see `requirements.txt`). PyInstaller packaging is planned for a future ticket.
 
-## Future scan behavior (not implemented yet)
+## Scan behavior
 
-Planned discovery targets include:
+For each input domain the tool:
 
-- DNS records on the 3rd-level locality domain itself
-- Possible 4th-level subdelegations (e.g. `ci.locality.state.us`, `co.locality.state.us`)
-- Possible 5th-level names (e.g. `www.ci.locality.state.us`)
-- Record types: NS, SOA, A, AAAA, MX, TXT, CNAME, CAA
-- AXFR results when zone transfer is allowed
-- Direct queries to authoritative nameservers
+- Queries standard record types on the base domain: NS, SOA, A, AAAA, MX, TXT, CNAME, CAA
+- Discovers authoritative nameservers and optionally queries them directly
+- Optionally attempts AXFR (refused/timeout/failure is treated as a normal outcome)
+- Generates 4th-level candidates from wordlists (e.g. `ci.example.ky.us`)
+- Generates limited 5th-level candidates for `ci`/`co` branches (e.g. `www.ci.example.ky.us`)
+- Tests candidates for NS (possible subdelegation) plus SOA, A, AAAA, MX, TXT, CNAME
+- Probes for wildcard DNS using unlikely random names
+
+Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging the GUI.
 
 ## Discovery vs. authoritative truth
 
@@ -64,7 +69,7 @@ us_locality_dns_discovery/
 ├── scanner/
 │   ├── __init__.py
 │   ├── models.py          # Scan input/result dataclasses
-│   └── scan_engine.py     # Placeholder engine (future ticket)
+│   └── scan_engine.py     # DNS discovery engine
 ├── wordlists/
 │   ├── rfc1480.txt
 │   ├── civic.txt
@@ -75,9 +80,8 @@ us_locality_dns_discovery/
 └── .gitignore
 ```
 
-## Out of scope for this ticket
+## Out of scope (future tickets)
 
-- Live DNS queries or AXFR
 - CSV/JSON export
 - PyInstaller packaging
 - Web UI, authentication, database, or cloud hosting

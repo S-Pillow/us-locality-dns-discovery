@@ -1,8 +1,7 @@
 # US Locality DNS Discovery Tool — dependencies
 # Python 3.11+ required (stdlib Tkinter used for GUI)
 
-# Planned for a future scan-engine ticket:
-# dnspython>=2.6.0
+dnspython>=2.6.0
 
 # Planned for a future packaging ticket:
 # pyinstaller>=6.0
