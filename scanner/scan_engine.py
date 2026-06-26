@@ -1004,7 +1004,12 @@ def _query_records(
                 )
             continue
 
-        # rc in {OWNER_MATCHING_ANSWER, CNAME_ALIAS, REFERRAL_DELEGATION, NODATA_EMPTY_ANSWER}
+        if rc == DNSResponseClass.NODATA_EMPTY_ANSWER:
+            # Fail-closed: zone exists but queried type is absent (or answer
+            # and authority are both empty).  No direct finding.
+            continue
+
+        # rc in {OWNER_MATCHING_ANSWER, CNAME_ALIAS, REFERRAL_DELEGATION}
         parsed = _parse_dns_response(
             response,
             fqdn,

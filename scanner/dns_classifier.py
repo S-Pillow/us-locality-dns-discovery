@@ -5,6 +5,11 @@ finding creation code may inspect it.  Finding creation paths consult the
 returned DNSResponseClass to decide whether and what kind of evidence is
 permitted.
 
+Nine classifier values (DNSResponseClass):
+  OWNER_MATCHING_ANSWER, REFERRAL_DELEGATION, NEGATIVE_NXDOMAIN,
+  NODATA_EMPTY_ANSWER, SERVFAIL, TIMEOUT, UNRELATED_AUTHORITY,
+  CNAME_ALIAS, MALFORMED_OR_UNUSABLE
+
 Classification priority (highest to lowest):
   transport error                 → TIMEOUT or MALFORMED_OR_UNUSABLE
   missing response object         → MALFORMED_OR_UNUSABLE
@@ -51,8 +56,8 @@ class DNSResponseClass(str, Enum):
     NODATA_EMPTY_ANSWER = "nodata_empty_answer"
     """rcode NOERROR, no owner-matching answer, and either (a) authority SOA
     owner equals the queried name (zone exists, record type absent) or (b)
-    authority section is empty.  No direct finding; owner-matching authority
-    SOA may still be extracted for zone/apex evidence."""
+    authority section is empty.  No finding.  Fail-closed: must not call
+    finding-creation code (_parse_dns_response)."""
 
     SERVFAIL = "servfail"
     """rcode SERVFAIL.  No finding."""
@@ -195,6 +200,7 @@ def classify_dns_response(
 _NO_FINDING_CLASSES: frozenset[DNSResponseClass] = frozenset(
     {
         DNSResponseClass.NEGATIVE_NXDOMAIN,
+        DNSResponseClass.NODATA_EMPTY_ANSWER,
         DNSResponseClass.SERVFAIL,
         DNSResponseClass.TIMEOUT,
         DNSResponseClass.UNRELATED_AUTHORITY,

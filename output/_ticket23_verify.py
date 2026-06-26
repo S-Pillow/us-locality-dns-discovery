@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Ticket 23 verification: DNS response classification firewall.
 
-Tests every required DNSResponseClass value, all evidence rules, and the
-specific false-positive regression fixtures from the ticket.
+Tests all nine DNSResponseClass values, evidence rules, and the specific
+false-positive regression fixtures from the ticket.
 
 All DNS interactions are synthetic (mocked); no live network calls occur.
 """
@@ -26,7 +26,7 @@ import dns.rrset
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scanner.dns_classifier import DNSResponseClass, classify_dns_response
+from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
 from scanner.models import (
     DiscoveredRecord,
     DomainInputRecord,
@@ -757,29 +757,44 @@ def test_known_good_ordinary_a_record() -> None:
     print("known-good: ordinary A record evidence: OK")
 
 
-def test_known_good_base_domain_authority_soa() -> None:
-    """NOERROR + authority SOA for the base domain (NODATA_EMPTY_ANSWER class) still
-    creates BASE_ZONE_EXISTS — preserves Ticket 20 behavior."""
+def test_nodata_fail_closed_through_query_records() -> None:
+    """NODATA_EMPTY_ANSWER must not call _parse_dns_response and creates no finding.
+
+    Authority SOA for the queried name (zone exists, record type absent) is
+    classified NODATA and fail-closed at the classifier gate.  Owner-matching
+    SOA in the answer section (OWNER_MATCHING_ANSWER) is the supported path
+    for zone/apex evidence via _query_records.
+    """
     base = "fei.davis.ca.us"
     response = _make_response(base, "A", dns.rcode.NOERROR)
-    _add_authority_soa(response, base, "ns-432.awsdns-54.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400")
-
-    # Confirm classifier says NODATA_EMPTY_ANSWER (not UNRELATED_AUTHORITY)
-    rc = classify_dns_response(response, base)
-    assert rc == DNSResponseClass.NODATA_EMPTY_ANSWER, f"base-domain auth SOA: expected NODATA_EMPTY_ANSWER, got {rc}"
-
-    findings = _parse_dns_response(
+    _add_authority_soa(
         response,
         base,
-        RecordType.A,
-        base_domain=base,
-        source_method="authoritative_nameserver",
-        classification=FindingClassification.BASE_DOMAIN_RECORD,
-        nameserver=None,
+        "ns-432.awsdns-54.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400",
     )
-    assert findings, "base-domain authority SOA must still create BASE_ZONE_EXISTS"
-    assert findings[0].classification == FindingClassification.BASE_ZONE_EXISTS
-    print("known-good: base-domain authority SOA -> BASE_ZONE_EXISTS: OK")
+
+    rc = classify_dns_response(response, base)
+    assert rc == DNSResponseClass.NODATA_EMPTY_ANSWER, (
+        f"base-domain auth SOA: expected NODATA_EMPTY_ANSWER, got {rc}"
+    )
+    assert is_no_finding_class(rc), "NODATA_EMPTY_ANSWER must be a no-finding class"
+
+    def fake_send(fqdn, record_type, resolver):
+        return response, None
+
+    with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send):
+        findings, errors = _query_records(
+            base,
+            (RecordType.A,),
+            _make_resolver(),
+            source_method="authoritative_nameserver",
+            classification=FindingClassification.BASE_DOMAIN_RECORD,
+            base_domain=base,
+        )
+    assert not findings, (
+        "NODATA_EMPTY_ANSWER must fail-closed: no findings via _query_records"
+    )
+    print("fail-closed: NODATA_EMPTY_ANSWER bypasses _parse_dns_response: OK")
 
 
 def test_known_good_log_diagnostic_for_unrelated_authority() -> None:
@@ -881,7 +896,7 @@ def main() -> None:
     print("\n-- Section 5: Known-good cases --")
     test_known_good_delegated_child_zone_via_answer_ns()
     test_known_good_ordinary_a_record()
-    test_known_good_base_domain_authority_soa()
+    test_nodata_fail_closed_through_query_records()
     test_known_good_log_diagnostic_for_unrelated_authority()
 
     print("\n-- Section 6: Prior regression chain --")
