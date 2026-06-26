@@ -20,6 +20,7 @@ import dns.rdatatype
 import dns.resolver
 import dns.zone
 
+from scanner.dns_classifier import DNSResponseClass, classify_dns_response
 from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.models import (
     CancellationToken,
@@ -647,6 +648,7 @@ def _validate_fourth_level_parent(
         source_method=FIFTH_LEVEL_PARENT_SOURCE,
         classification=FindingClassification.DELEGATED_CHILD_ZONE,
         base_domain=domain,
+        log_sink=messages,
     )
     if ns_findings:
         for item in ns_findings:
@@ -669,6 +671,7 @@ def _validate_fourth_level_parent(
         source_method=FIFTH_LEVEL_PARENT_SOURCE,
         classification=FindingClassification.STANDARD_RECORD,
         base_domain=domain,
+        log_sink=messages,
     )
     for item in other_findings:
         item.confidence = _confidence_for(
@@ -952,7 +955,15 @@ def _query_records(
     nameserver: str | None = None,
     confidence: str = "normal",
     base_domain: str | None = None,
+    log_sink: list[str] | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
+    """Query *fqdn* for each of *record_types*; return findings and error strings.
+
+    Every raw DNS response is classified by :func:`classify_dns_response`
+    before any finding creation code may inspect it.  Responses whose class
+    does not permit findings are discarded; UNRELATED_AUTHORITY responses emit
+    a diagnostic line to *log_sink* when provided.
+    """
     findings: list[DiscoveredRecord] = []
     errors: list[str] = []
     qname = _query_name(fqdn)
@@ -960,22 +971,40 @@ def _query_records(
 
     for record_type in record_types:
         response, transport_error = _send_dns_query(fqdn, record_type, resolver)
-        if transport_error:
-            if "timeout" in transport_error.lower():
-                errors.append(transport_error)
-            elif "no resolver" in transport_error.lower():
-                errors.append(transport_error)
-            else:
-                errors.append(transport_error)
-            continue
-        if response is None:
+
+        rc = classify_dns_response(response, fqdn, transport_error)
+
+        if rc == DNSResponseClass.TIMEOUT:
+            errors.append(transport_error or f"{qname} {record_type.value}: timeout")
             continue
 
-        rcode = response.rcode()
-        if rcode not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
-            errors.append(f"{qname} {record_type.value}: {dns.rcode.to_text(rcode)}")
+        if rc == DNSResponseClass.MALFORMED_OR_UNUSABLE:
+            if transport_error:
+                errors.append(transport_error)
+            elif response is not None:
+                try:
+                    errors.append(
+                        f"{qname} {record_type.value}: {dns.rcode.to_text(response.rcode())}"
+                    )
+                except Exception:
+                    pass
             continue
 
+        if rc == DNSResponseClass.SERVFAIL:
+            errors.append(f"{qname} {record_type.value}: SERVFAIL")
+            continue
+
+        if rc == DNSResponseClass.NEGATIVE_NXDOMAIN:
+            continue
+
+        if rc == DNSResponseClass.UNRELATED_AUTHORITY:
+            if log_sink is not None:
+                log_sink.append(
+                    f"Ignored unrelated authority data while checking {fqdn} ({record_type.value})"
+                )
+            continue
+
+        # rc in {OWNER_MATCHING_ANSWER, CNAME_ALIAS, REFERRAL_DELEGATION, NODATA_EMPTY_ANSWER}
         parsed = _parse_dns_response(
             response,
             fqdn,
@@ -1306,6 +1335,7 @@ def _test_candidates(
                 source_method="generated_candidate",
                 classification=FindingClassification.DELEGATED_CHILD_ZONE,
                 base_domain=domain,
+                log_sink=messages,
             )
             if ns_findings:
                 subdelegation_count += 1
@@ -1328,6 +1358,7 @@ def _test_candidates(
                 source_method="generated_candidate",
                 classification=FindingClassification.STANDARD_RECORD,
                 base_domain=domain,
+                log_sink=messages,
             )
             for item in other_findings:
                 item.confidence = _confidence_for(
@@ -1427,6 +1458,7 @@ def scan_domain(
             source_method="recursive_resolver",
             classification=FindingClassification.BASE_DOMAIN_RECORD,
             base_domain=domain,
+            log_sink=messages,
         )
         result.records.extend(base_findings)
 
@@ -1560,6 +1592,7 @@ def scan_domain(
                         classification=FindingClassification.BASE_DOMAIN_RECORD,
                         nameserver=f"{ns_host} ({ns_ip})",
                         base_domain=domain,
+                        log_sink=messages,
                     )
                     if auth_findings:
                         _emit(
