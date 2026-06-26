@@ -7,7 +7,6 @@ import uuid
 from pathlib import Path
 
 import dns.exception
-import dns.name
 import dns.query
 import dns.rdatatype
 import dns.resolver
@@ -22,10 +21,13 @@ from scanner.models import (
     ScanInput,
     ScanOptions,
     ScanRunResult,
+    WordlistPlan,
 )
 
 DNS_TIMEOUT = 3.0
 DNS_LIFETIME = 5.0
+CANDIDATE_WARN_THRESHOLD = 250
+CANDIDATE_STRONG_WARN_THRESHOLD = 500
 
 BASE_RECORD_TYPES = (
     RecordType.NS,
@@ -50,6 +52,23 @@ CANDIDATE_RECORD_TYPES = (
 FIFTH_LEVEL_BRANCHES = ("ci", "co")
 WILDCARD_PROBE_COUNT = 2
 LOW_CONFIDENCE_TYPES = {RecordType.A, RecordType.AAAA, RecordType.CNAME}
+
+# option field -> (log display name, wordlist filename)
+WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
+    ("include_rfc_locality_baseline", "RFC/locality baseline", "rfc1480.txt"),
+    ("include_dns_common", "Common DNS/web labels", "dns_common.txt"),
+    ("include_civic_departments", "Civic departments", "civic_departments.txt"),
+    ("include_public_services", "Public services / portals", "public_services.txt"),
+    ("include_schools_libraries", "Schools / libraries", "schools_libraries.txt"),
+    ("include_delegated_manager_clues", "Delegated-manager clues", "delegated_manager_clues.txt"),
+)
+
+FIFTH_LEVEL_PREFIX_SOURCES = (
+    "include_dns_common",
+    "include_civic_departments",
+    "include_public_services",
+    "include_schools_libraries",
+)
 
 
 def validate_domain_file(path: Path) -> tuple[bool, str]:
@@ -85,8 +104,7 @@ def _display_name(name: str) -> str:
 
 
 def _query_name(name: str) -> str:
-    cleaned = name.strip().lower().rstrip(".")
-    return cleaned
+    return name.strip().lower().rstrip(".")
 
 
 def _parse_label_rows(path: Path) -> list[str]:
@@ -97,12 +115,12 @@ def _parse_label_rows(path: Path) -> list[str]:
             for row in reader:
                 if not row:
                     continue
-                cell = row[0].strip()
+                cell = row[0].strip().lower()
                 if cell and not cell.startswith("#"):
                     labels.append(cell)
     else:
         for line in path.read_text(encoding="utf-8").splitlines():
-            cell = line.strip()
+            cell = line.strip().lower()
             if cell and not cell.startswith("#"):
                 labels.append(cell)
     return labels
@@ -121,50 +139,132 @@ def load_domains(path: Path) -> list[str]:
     return domains
 
 
-def load_wordlist_labels(options: ScanOptions, wordlists_dir: Path) -> tuple[list[str], list[str], list[str]]:
-    """Return RFC1480, civic, and dns_common label lists based on options."""
-    rfc1480: list[str] = []
-    civic: list[str] = []
-    dns_common: list[str] = []
-
-    if options.use_builtin_wordlist:
-        if options.include_rfc1480_patterns:
-            rfc1480 = _parse_label_rows(wordlists_dir / "rfc1480.txt")
-        if options.include_civic_labels:
-            civic = _parse_label_rows(wordlists_dir / "civic.txt")
-        if options.include_dns_common_labels:
-            dns_common = _parse_label_rows(wordlists_dir / "dns_common.txt")
-
-    if options.custom_wordlist_path:
-        custom = _parse_label_rows(options.custom_wordlist_path)
-        dns_common = list(dict.fromkeys(dns_common + custom))
-
-    return rfc1480, civic, dns_common
+def _dedupe_labels(labels: list[str]) -> list[str]:
+    return list(dict.fromkeys(label.lower() for label in labels if label))
 
 
-def generate_candidates(
-    base_domain: str,
-    rfc1480: list[str],
-    civic: list[str],
-    dns_common: list[str],
+def build_wordlist_plan(options: ScanOptions, wordlists_dir: Path) -> WordlistPlan:
+    """Load selected wordlist sources and compute candidate estimates."""
+    source_counts: dict[str, int] = {}
+    combined: list[str] = []
+    fifth_prefix: list[str] = []
+
+    for option_field, display_name, filename in WORDLIST_SOURCES:
+        if not getattr(options, option_field):
+            continue
+        path = wordlists_dir / filename
+        labels = _parse_label_rows(path) if path.is_file() else []
+        source_counts[display_name] = len(labels)
+        combined.extend(labels)
+        if option_field in FIFTH_LEVEL_PREFIX_SOURCES:
+            fifth_prefix.extend(labels)
+
+    if options.include_custom_wordlist and options.custom_wordlist_path:
+        custom_labels = _parse_label_rows(options.custom_wordlist_path)
+        source_counts["Custom wordlist"] = len(custom_labels)
+        combined.extend(custom_labels)
+        fifth_prefix.extend(custom_labels)
+
+    unique_labels = _dedupe_labels(combined)
+    fifth_prefix_labels = _dedupe_labels(fifth_prefix)
+    fifth_level_enabled = options.include_rfc_locality_baseline and bool(fifth_prefix_labels)
+
+    fourth_level_count = len(unique_labels)
+    fifth_level_count = len(fifth_prefix_labels) * len(FIFTH_LEVEL_BRANCHES) if fifth_level_enabled else 0
+
+    return WordlistPlan(
+        source_counts=source_counts,
+        total_unique_labels=len(unique_labels),
+        estimated_candidates_per_domain=fourth_level_count + fifth_level_count,
+        fifth_level_enabled=fifth_level_enabled,
+        fifth_level_prefix_count=len(fifth_prefix_labels),
+        unique_labels=unique_labels,
+        fifth_level_prefix_labels=fifth_prefix_labels,
+    )
+
+
+def log_wordlist_plan(
+    plan: WordlistPlan,
     options: ScanOptions,
-) -> list[str]:
-    """Build 4th- and limited 5th-level candidate FQDNs."""
+    progress: ProgressCallback | None,
+    messages: list[str],
+) -> None:
+    """Log selected wordlist sources, counts, and candidate estimates."""
+    _emit("Wordlist sources used:", progress, messages)
+
+    if not plan.source_counts:
+        _emit("  (none selected — no candidate labels will be tested)", progress, messages)
+    else:
+        for name, count in plan.source_counts.items():
+            _emit(f"  {name}: {count} labels", progress, messages)
+
+    if options.custom_wordlist_path and not options.include_custom_wordlist:
+        _emit(
+            "  Custom wordlist file selected but not included (checkbox unchecked).",
+            progress,
+            messages,
+        )
+    elif not options.custom_wordlist_path:
+        _emit("  Custom wordlist: not selected", progress, messages)
+
+    _emit(f"  Total unique candidate labels: {plan.total_unique_labels}", progress, messages)
+    _emit(
+        f"  Estimated candidate names per base domain: {plan.estimated_candidates_per_domain}",
+        progress,
+        messages,
+    )
+
+    if plan.fifth_level_enabled:
+        _emit(
+            f"  5th-level candidate generation: enabled "
+            f"({plan.fifth_level_prefix_count} prefix labels × {len(FIFTH_LEVEL_BRANCHES)} branches: "
+            f"{', '.join(FIFTH_LEVEL_BRANCHES)})",
+            progress,
+            messages,
+        )
+    else:
+        reason = (
+            "RFC/locality baseline not selected"
+            if not options.include_rfc_locality_baseline
+            else "no prefix labels selected for 5th-level generation"
+        )
+        _emit(f"  5th-level candidate generation: disabled ({reason})", progress, messages)
+
+    _emit(
+        "  Note: selected wordlists are not complete; absence of discovered records "
+        "is not proof that records or subdelegations do not exist.",
+        progress,
+        messages,
+    )
+
+    estimate = plan.estimated_candidates_per_domain
+    if estimate > CANDIDATE_STRONG_WARN_THRESHOLD:
+        _emit(
+            f"  WARNING: estimated {estimate} candidates per domain is very large — "
+            "scan time and noise may increase significantly.",
+            progress,
+            messages,
+        )
+    elif estimate > CANDIDATE_WARN_THRESHOLD:
+        _emit(
+            f"  Warning: estimated {estimate} candidates per domain may increase scan time and noise.",
+            progress,
+            messages,
+        )
+
+
+def generate_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
+    """Build 4th- and limited 5th-level candidate FQDNs from a wordlist plan."""
     base = _query_name(base_domain)
-    labels = list(dict.fromkeys(rfc1480 + civic + dns_common))
     candidates: list[str] = []
 
-    for label in labels:
+    for label in plan.unique_labels:
         candidates.append(f"{label}.{base}")
 
-    fifth_common = list(dict.fromkeys(dns_common + (civic if options.include_civic_labels else [])))
-    if options.include_rfc1480_patterns:
-        branches = FIFTH_LEVEL_BRANCHES
-        if not options.use_builtin_wordlist:
-            branches = [label for label in rfc1480 if label in FIFTH_LEVEL_BRANCHES] or list(FIFTH_LEVEL_BRANCHES)
-        for branch in branches:
-            for common_label in fifth_common:
-                candidates.append(f"{common_label}.{branch}.{base}")
+    if plan.fifth_level_enabled:
+        for branch in FIFTH_LEVEL_BRANCHES:
+            for prefix in plan.fifth_level_prefix_labels:
+                candidates.append(f"{prefix}.{branch}.{base}")
 
     return list(dict.fromkeys(candidates))
 
@@ -312,10 +412,7 @@ def _wildcard_probe(base_domain: str) -> tuple[bool, list[str]]:
     base = _query_name(base_domain)
     resolver = _make_resolver()
     token = uuid.uuid4().hex[:10]
-    probe_names = [
-        f"_wcprobe{token}{index}.{base}"
-        for index in range(WILDCARD_PROBE_COUNT)
-    ]
+    probe_names = [f"_wcprobe{token}{index}.{base}" for index in range(WILDCARD_PROBE_COUNT)]
     signatures: list[str] = []
     log_lines: list[str] = []
 
@@ -360,7 +457,7 @@ def _confidence_for(
 def scan_domain(
     base_domain: str,
     options: ScanOptions,
-    wordlists_dir: Path,
+    plan: WordlistPlan,
     progress: ProgressCallback | None,
     messages: list[str],
 ) -> DomainScanResult:
@@ -487,8 +584,7 @@ def scan_domain(
                 messages,
             )
 
-    rfc1480, civic, dns_common = load_wordlist_labels(options, wordlists_dir)
-    candidates = generate_candidates(domain, rfc1480, civic, dns_common, options)
+    candidates = generate_candidates(domain, plan)
     result.candidates_tested = len(candidates)
     _emit(f"  Candidate names to test: {len(candidates)}", progress, messages)
 
@@ -497,7 +593,6 @@ def scan_domain(
     empty_candidates = 0
 
     for candidate in candidates:
-        confidence = "normal"
         ns_findings, ns_candidate_errors = _query_records(
             candidate,
             (RecordType.NS,),
@@ -582,6 +677,10 @@ def run_scan(
         messages,
     )
 
+    plan = build_wordlist_plan(scan_input.options, scan_input.wordlists_dir)
+    result.wordlist_plan = plan
+    log_wordlist_plan(plan, scan_input.options, progress_callback, messages)
+
     try:
         domains = load_domains(scan_input.domain_file_path)
     except OSError as exc:
@@ -599,7 +698,7 @@ def run_scan(
             domain_result = scan_domain(
                 domain,
                 scan_input.options,
-                scan_input.wordlists_dir,
+                plan,
                 progress_callback,
                 messages,
             )

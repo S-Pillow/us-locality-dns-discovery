@@ -9,8 +9,14 @@ from scanner.models import (
     ScanInput,
     ScanOptions,
     ScanRunResult,
+    WordlistPlan,
 )
-from scanner.scan_engine import run_scan, validate_domain_file, validate_wordlist_file
+from scanner.scan_engine import (
+    build_wordlist_plan,
+    run_scan,
+    validate_domain_file,
+    validate_wordlist_file,
+)
 
 __all__ = [
     "DiscoveredRecord",
@@ -21,6 +27,8 @@ __all__ = [
     "ScanInput",
     "ScanOptions",
     "ScanRunResult",
+    "WordlistPlan",
+    "build_wordlist_plan",
     "run_scan",
     "validate_domain_file",
     "validate_wordlist_file",

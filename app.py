@@ -24,25 +24,32 @@ class DiscoveryApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.minsize(720, 560)
-        self.geometry("900x640")
+        self.minsize(720, 640)
+        self.geometry("920x720")
 
         self.domain_file_var = tk.StringVar()
         self.wordlist_file_var = tk.StringVar()
 
-        self.use_builtin_var = tk.BooleanVar(value=True)
-        self.rfc1480_var = tk.BooleanVar(value=True)
-        self.civic_var = tk.BooleanVar(value=True)
+        self.rfc_locality_var = tk.BooleanVar(value=True)
         self.dns_common_var = tk.BooleanVar(value=True)
+        self.civic_departments_var = tk.BooleanVar(value=True)
+        self.public_services_var = tk.BooleanVar(value=False)
+        self.schools_libraries_var = tk.BooleanVar(value=False)
+        self.delegated_manager_var = tk.BooleanVar(value=False)
+        self.include_custom_var = tk.BooleanVar(value=False)
+
         self.axfr_var = tk.BooleanVar(value=False)
         self.auth_ns_var = tk.BooleanVar(value=True)
 
         self._scan_thread: threading.Thread | None = None
         self._last_scan_result: ScanRunResult | None = None
 
+        self.wordlist_file_var.trace_add("write", self._on_wordlist_path_changed)
+
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
         self._build_ui()
+        self._on_wordlist_path_changed()
         self._log("Ready. Select a domain list and click Run Scan to begin DNS discovery.")
 
     def _build_ui(self) -> None:
@@ -67,25 +74,44 @@ class DiscoveryApp(tk.Tk):
             command=self._browse_wordlist_file,
         )
 
-        options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
-        options_frame.pack(fill=tk.X, pady=(0, 10))
+        wordlist_frame = ttk.LabelFrame(main, text="Wordlist Sources", padding=10)
+        wordlist_frame.pack(fill=tk.X, pady=(0, 10))
 
-        option_rows = [
-            ("Use built-in wordlist", self.use_builtin_var),
-            ("Include RFC 1480-style locality patterns", self.rfc1480_var),
-            ("Include common civic labels", self.civic_var),
-            ("Include common DNS labels", self.dns_common_var),
-            ("Attempt AXFR", self.axfr_var),
-            ("Query authoritative nameservers directly", self.auth_ns_var),
+        wordlist_rows = [
+            ("RFC/locality baseline", self.rfc_locality_var),
+            ("Common DNS/web labels", self.dns_common_var),
+            ("Civic departments", self.civic_departments_var),
+            ("Public services / portals", self.public_services_var),
+            ("Schools / libraries", self.schools_libraries_var),
+            ("Delegated-manager clues", self.delegated_manager_var),
         ]
-        for index, (text, variable) in enumerate(option_rows):
-            ttk.Checkbutton(options_frame, text=text, variable=variable).grid(
+        for index, (text, variable) in enumerate(wordlist_rows):
+            ttk.Checkbutton(wordlist_frame, text=text, variable=variable).grid(
                 row=index // 2,
                 column=index % 2,
                 sticky=tk.W,
                 padx=(0, 24),
                 pady=2,
             )
+
+        self.custom_wordlist_check = ttk.Checkbutton(
+            wordlist_frame,
+            text="Include custom wordlist (when file selected)",
+            variable=self.include_custom_var,
+        )
+        self.custom_wordlist_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+
+        options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
+        options_frame.pack(fill=tk.X, pady=(0, 10))
+
+        ttk.Checkbutton(options_frame, text="Attempt AXFR", variable=self.axfr_var).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 24), pady=2
+        )
+        ttk.Checkbutton(
+            options_frame,
+            text="Query authoritative nameservers directly",
+            variable=self.auth_ns_var,
+        ).grid(row=0, column=1, sticky=tk.W, pady=2)
 
         actions_frame = ttk.Frame(main)
         actions_frame.pack(fill=tk.X, pady=(0, 10))
@@ -155,6 +181,16 @@ class DiscoveryApp(tk.Tk):
             self.wordlist_file_var.set(path)
             self._log(f"Selected custom wordlist: {path}")
 
+    def _on_wordlist_path_changed(self, *_args) -> None:
+        has_file = bool(self.wordlist_file_var.get().strip())
+        if has_file:
+            self.custom_wordlist_check.configure(state=tk.NORMAL)
+            if not self.include_custom_var.get():
+                self.include_custom_var.set(True)
+        else:
+            self.include_custom_var.set(False)
+            self.custom_wordlist_check.configure(state=tk.DISABLED)
+
     def _log(self, message: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_text.configure(state=tk.NORMAL)
@@ -189,34 +225,37 @@ class DiscoveryApp(tk.Tk):
         return True, domain_path, wordlist_path
 
     def _collect_scan_options(self, wordlist_path: Path | None) -> ScanOptions:
+        include_custom = bool(wordlist_path) and self.include_custom_var.get()
         return ScanOptions(
-            use_builtin_wordlist=self.use_builtin_var.get(),
-            include_rfc1480_patterns=self.rfc1480_var.get(),
-            include_civic_labels=self.civic_var.get(),
-            include_dns_common_labels=self.dns_common_var.get(),
+            include_rfc_locality_baseline=self.rfc_locality_var.get(),
+            include_dns_common=self.dns_common_var.get(),
+            include_civic_departments=self.civic_departments_var.get(),
+            include_public_services=self.public_services_var.get(),
+            include_schools_libraries=self.schools_libraries_var.get(),
+            include_delegated_manager_clues=self.delegated_manager_var.get(),
+            include_custom_wordlist=include_custom,
+            custom_wordlist_path=wordlist_path if include_custom else None,
             attempt_axfr=self.axfr_var.get(),
             query_authoritative_ns=self.auth_ns_var.get(),
-            custom_wordlist_path=wordlist_path,
         )
 
     def _log_scan_options(self, options: ScanOptions) -> None:
         self._log("Scan options:")
-        self._log(f"  Use built-in wordlist: {options.use_builtin_wordlist}")
-        self._log(f"  RFC 1480-style patterns: {options.include_rfc1480_patterns}")
-        self._log(f"  Common civic labels: {options.include_civic_labels}")
-        self._log(f"  Common DNS labels: {options.include_dns_common_labels}")
+        self._log(f"  RFC/locality baseline: {options.include_rfc_locality_baseline}")
+        self._log(f"  Common DNS/web labels: {options.include_dns_common}")
+        self._log(f"  Civic departments: {options.include_civic_departments}")
+        self._log(f"  Public services / portals: {options.include_public_services}")
+        self._log(f"  Schools / libraries: {options.include_schools_libraries}")
+        self._log(f"  Delegated-manager clues: {options.include_delegated_manager_clues}")
+        if options.custom_wordlist_path and options.include_custom_wordlist:
+            self._log(f"  Custom wordlist included: {options.custom_wordlist_path}")
+        elif options.custom_wordlist_path:
+            self._log(f"  Custom wordlist file selected but excluded: {options.custom_wordlist_path}")
+        else:
+            self._log("  Custom wordlist: not selected")
+
         self._log(f"  Attempt AXFR: {options.attempt_axfr}")
         self._log(f"  Query authoritative NS: {options.query_authoritative_ns}")
-        if options.custom_wordlist_path:
-            self._log(f"  Custom wordlist: {options.custom_wordlist_path}")
-        else:
-            self._log("  Custom wordlist: (none)")
-
-        if options.use_builtin_wordlist:
-            for name in ("rfc1480.txt", "civic.txt", "dns_common.txt"):
-                path = WORDLISTS_DIR / name
-                status = "found" if path.is_file() else "missing"
-                self._log(f"  Built-in wordlist {name}: {status}")
 
     def _set_scan_running(self, running: bool) -> None:
         state = tk.DISABLED if running else tk.NORMAL

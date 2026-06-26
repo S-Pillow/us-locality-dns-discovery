@@ -40,13 +40,29 @@ class FindingClassification(str, Enum):
 class ScanOptions:
     """User-selected scan configuration."""
 
-    use_builtin_wordlist: bool = True
-    include_rfc1480_patterns: bool = True
-    include_civic_labels: bool = True
-    include_dns_common_labels: bool = True
+    include_rfc_locality_baseline: bool = True
+    include_dns_common: bool = True
+    include_civic_departments: bool = True
+    include_public_services: bool = False
+    include_schools_libraries: bool = False
+    include_delegated_manager_clues: bool = False
+    include_custom_wordlist: bool = False
+    custom_wordlist_path: Optional[Path] = None
     attempt_axfr: bool = False
     query_authoritative_ns: bool = True
-    custom_wordlist_path: Optional[Path] = None
+
+
+@dataclass
+class WordlistPlan:
+    """Resolved wordlist selections used for a scan run."""
+
+    source_counts: dict[str, int] = field(default_factory=dict)
+    total_unique_labels: int = 0
+    estimated_candidates_per_domain: int = 0
+    fifth_level_enabled: bool = False
+    fifth_level_prefix_count: int = 0
+    unique_labels: list[str] = field(default_factory=list)
+    fifth_level_prefix_labels: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -90,3 +106,4 @@ class ScanRunResult:
     input: ScanInput
     domain_results: list[DomainScanResult] = field(default_factory=list)
     status_messages: list[str] = field(default_factory=list)
+    wordlist_plan: Optional[WordlistPlan] = None

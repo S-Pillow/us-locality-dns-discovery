@@ -4,26 +4,45 @@ Internal-use **standalone Windows desktop utility** (Python 3.11+) for discoveri
 
 ## Current status (working prototype)
 
-This version includes a **functional DNS discovery scan engine** wired to the Tkinter GUI. It performs controlled DNS lookups using `dnspython` when you click **Run Scan**.
+This version includes a **functional DNS discovery scan engine** with **tiered wordlist source controls**. It performs controlled DNS lookups using `dnspython` when you click **Run Scan**.
 
 What works today:
 
 - Tkinter desktop GUI with threaded scan execution (GUI stays responsive)
 - Domain list file picker (`.txt` / `.csv`) with normalization and `#` comment support
-- Optional custom wordlist file picker (`.txt` / `.csv`)
-- Scan option checkboxes controlling wordlists, authoritative NS queries, and AXFR attempts
+- **Wordlist Sources** checkboxes for transparent control over candidate label groups
+- Optional custom wordlist file with an explicit include checkbox
+- Scan options for authoritative NS queries and AXFR attempts
+- Pre-scan logging of selected sources, label counts, and estimated candidate names
+- Candidate-count warnings when estimates exceed 250 or 500 names per domain
 - Real DNS discovery for base domains and generated candidate subdomains
-- Progress and results logged to the status area
 - Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
 - Disabled **Export Results** button (future ticket)
 
-Built-in wordlists are editable text files under `wordlists/`:
+## Wordlist sources
 
-| File | Purpose |
-|------|---------|
-| `rfc1480.txt` | RFC 1480-style locality labels (e.g. `ci`, `co`, `town`) |
-| `civic.txt` | Common civic / government service labels |
-| `dns_common.txt` | Common DNS host labels (e.g. `www`, `mail`, `portal`) |
+Built-in wordlists are editable one-label-per-line text files under `wordlists/`:
+
+| File | GUI checkbox | Default |
+|------|--------------|---------|
+| `rfc1480.txt` | RFC/locality baseline | On |
+| `dns_common.txt` | Common DNS/web labels | On |
+| `civic_departments.txt` | Civic departments | On |
+| `public_services.txt` | Public services / portals | Off |
+| `schools_libraries.txt` | Schools / libraries | Off |
+| `delegated_manager_clues.txt` | Delegated-manager clues | Off |
+
+**Custom wordlist:** browse for a `.txt` or `.csv` file, then use **Include custom wordlist** to control whether it is merged into the scan. If no file is selected, custom labels are not used. The scan log always shows which sources were included.
+
+Before scanning, the log reports:
+
+- Label count per selected source
+- Total unique candidate labels (deduplicated across sources)
+- Estimated candidate names per base domain (4th-level + optional 5th-level `ci`/`co` branches)
+- Whether 5th-level generation is enabled
+- Warnings when candidate estimates exceed 250 or 500
+
+Selected wordlists are **not complete** — they are starting points for discovery only.
 
 ## How to run
 
@@ -44,8 +63,8 @@ For each input domain the tool:
 - Queries standard record types on the base domain: NS, SOA, A, AAAA, MX, TXT, CNAME, CAA
 - Discovers authoritative nameservers and optionally queries them directly
 - Optionally attempts AXFR (refused/timeout/failure is treated as a normal outcome)
-- Generates 4th-level candidates from wordlists (e.g. `ci.example.ky.us`)
-- Generates limited 5th-level candidates for `ci`/`co` branches (e.g. `www.ci.example.ky.us`)
+- Generates 4th-level candidates from selected wordlist labels (e.g. `ci.example.ky.us`)
+- Generates limited 5th-level candidates for `ci`/`co` branches when RFC/locality baseline is selected (e.g. `www.ci.example.ky.us`)
 - Tests candidates for NS (possible subdelegation) plus SOA, A, AAAA, MX, TXT, CNAME
 - Probes for wildcard DNS using unlikely random names
 
@@ -57,7 +76,7 @@ Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging 
 
 - **No records discovered using tested methods** does **not** prove that no records or subdelegations exist.
 - This tool must not claim complete zone enumeration.
-- Reports will use discovery-based language, not assertions of absence.
+- Reports use discovery-based language, not assertions of absence.
 
 Some `.us` locality 3rd-level domains are managed by GoDaddy Registry; others are managed by external Delegated Managers. For externally managed localities, internal portal views may not show 4th/5th-level subdelegations even when DNS activity exists in the external zone.
 
@@ -65,16 +84,19 @@ Some `.us` locality 3rd-level domains are managed by GoDaddy Registry; others ar
 
 ```
 us_locality_dns_discovery/
-├── app.py                 # GUI entry point
+├── app.py
 ├── scanner/
 │   ├── __init__.py
-│   ├── models.py          # Scan input/result dataclasses
-│   └── scan_engine.py     # DNS discovery engine
+│   ├── models.py
+│   └── scan_engine.py
 ├── wordlists/
 │   ├── rfc1480.txt
-│   ├── civic.txt
-│   └── dns_common.txt
-├── output/                # Future scan reports (gitignored except .gitkeep)
+│   ├── dns_common.txt
+│   ├── civic_departments.txt
+│   ├── public_services.txt
+│   ├── schools_libraries.txt
+│   └── delegated_manager_clues.txt
+├── output/
 ├── README.md
 ├── requirements.txt
 └── .gitignore
