@@ -102,6 +102,7 @@ class PreflightSummary:
     selected_domain_column: str = ""
     sample_domains_preview: list[str] = field(default_factory=list)
     input_warnings: list[str] = field(default_factory=list)
+    preferred_input_format_detected: bool = False
 
 
 @dataclass
@@ -136,6 +137,7 @@ class DomainLoadInfo:
     selected_domain_column: str = ""
     sample_domains_preview: list[str] = field(default_factory=list)
     input_warnings: list[str] = field(default_factory=list)
+    preferred_input_format_detected: bool = False
 
 
 class RecordType(str, Enum):

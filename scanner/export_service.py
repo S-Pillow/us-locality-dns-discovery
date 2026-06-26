@@ -16,6 +16,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from scanner.paths import is_frozen
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
+from scanner.input_loader import PREFERRED_INPUT_FORMAT_NOTE, RECOMMENDED_INPUT_COLUMNS_CSV
 from scanner.models import (
     DiscoveredRecord,
     DomainInputRecord,
@@ -1298,6 +1299,9 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("evidence_value_definition", EVIDENCE_VALUE_DEFINITION),
         ("domain_definition_note", DOMAIN_DEFINITION_NOTE),
         ("input_file_type", load_info.input_file_type if load_info else ""),
+        ("preferred_input_format_detected", str(load_info.preferred_input_format_detected).lower() if load_info else "false"),
+        ("recommended_input_columns", RECOMMENDED_INPUT_COLUMNS_CSV),
+        ("recommended_input_format_note", PREFERRED_INPUT_FORMAT_NOTE),
         ("metadata_columns_detected", ", ".join(load_info.metadata_columns_detected) if load_info else ""),
         ("domains_loaded", str(load_info.domains_loaded if load_info else len(result.domain_inputs))),
         ("duplicate_domains_removed", str(load_info.duplicate_domains_removed if load_info else 0)),

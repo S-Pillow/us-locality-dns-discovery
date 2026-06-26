@@ -11,7 +11,7 @@ Internal-use **standalone Windows desktop utility** (Python 3.11+) for **unknown
 ## Operator quick-start
 
 1. Open `USLocalityDNSDiscovery.exe` (or run `python app.py` from source).
-2. Select a `.txt` or `.csv` file with known 3rd-level domains (prefer enriched CSV with `domain`, `known_fourth_level_domains`, etc.).
+2. Select a `.txt` or `.csv` file with known 3rd-level domains (recommended enriched CSV below).
 3. Choose **Light Evidence** for a first 10–25 domain sample (default).
 4. Review **Preflight Summary** (selected domain column, first domains, profile, candidate estimate).
 5. Click **Run Scan** and watch the **phase/progress** text.
@@ -168,21 +168,36 @@ The tool accepts three input shapes:
 |------------|--------|-------|
 | **TXT** | One domain per line | `#` comments supported |
 | **Simple CSV** | One domain per row (first column) | No header row required |
-| **Enriched CSV** | Header row with domain + metadata columns | Metadata is preserved in XLSX Summary |
+| **Enriched CSV** | Header row with `domain` + known-child columns | **Recommended for real use** |
 
-**Enriched CSV domain column** — detected automatically from headers such as `third_level_domain`, `domain`, `domain_name`, `Domain Name`, or `Third Level Domain` (case/spacing/underscore insensitive).
+### Recommended enriched CSV (six columns)
 
-**Recognized metadata columns** (preserved when present):
+For real use, keep the input file focused on what the tool needs:
 
-- `second_level_domain`
-- `zone`
-- `companyname` / `delegated_manager` (exported as `delegated_manager`)
-- `fourth_level_domains` / `fifth_level_domains` (semicolon-separated lists)
-- `fourth_level_count` / `fifth_level_count`
+```csv
+domain,delegated_manager,known_fourth_level_domains,known_fifth_level_domains,fourth_level_count,fifth_level_count
+state.wv.us,Example Manager,,,0,0
+auburn.in.us,Mirage Computers,ci.auburn.in.us,,1,0
+```
 
-Duplicate domains are deduplicated; first-seen metadata is kept. Blank rows are ignored. If an enriched CSV has no recognizable domain column, validation fails with a clear error.
+| Column | Purpose |
+|--------|---------|
+| `domain` | Known 3rd-level `.us` domain from the system (for example `state.wv.us`) |
+| `delegated_manager` | Manager/operator context for the base domain |
+| `known_fourth_level_domains` | 4th-level domains already known in the system (semicolon-separated if multiple) |
+| `known_fifth_level_domains` | 5th-level domains already known in the system |
+| `fourth_level_count` | Count from the system (context only) |
+| `fifth_level_count` | Count from the system (context only) |
 
-Use enriched CSV when scanning a sample from a larger spreadsheet so the workbook can explain **why each domain matters** (delegated manager, zone, known child domains) alongside DNS findings.
+The tool compares **known domains from the input** against **child DNS names discovered from live DNS**. Keep the input file focused on the domain to scan and the known 4th/5th-level domains already in the system. Extra spreadsheet columns (`zone`, `locality_label`, `second_level_domain`, `companyname`, `sample_reason`, `notes`, etc.) are **not required** for the main purpose.
+
+Leave `known_fourth_level_domains` and `known_fifth_level_domains` blank when none are known. Do not include duplicate domain columns.
+
+**Legacy enriched CSV** — older exports with `third_level_domain`, `companyname`, `fourth_level_domains`, `zone`, and other columns still work. The loader prefers the `domain` column when duplicate domain-like headers exist.
+
+**Domain column detection** — recognized from headers such as `domain`, `third_level_domain`, `domain_name`, or `Domain Name` (case/spacing/underscore insensitive).
+
+Duplicate domains are deduplicated; first-seen metadata is kept. Blank rows and null-like known-domain values (`null`, `N/A`, `*`, etc.) are ignored.
 
 ### Known input child domains vs DNS-discovered names
 
@@ -190,26 +205,26 @@ The workbook separates two sources of child-domain information:
 
 | Source | Meaning |
 |--------|---------|
-| **Known child domains (input)** | 4th/5th-level names already listed in your spreadsheet (`fourth_level_domains`, `fifth_level_domains`). These are system-known, not new discoveries. |
-| **DNS-discovered child names (scan)** | Child names found through live DNS testing (`standard_record`, `delegated_child_zone`, candidate `zone_soa_discovered`, AXFR child records). |
+| **Known domains from system (input)** | Names in `known_fourth_level_domains` / `known_fifth_level_domains` — already in your system, not new discoveries |
+| **DNS-discovered child names (scan)** | Child names found through live DNS testing |
 
-Summary comparison columns include:
+Summary and Evidence Review columns include:
 
-- `known_child_domains_from_input` — normalized names from input metadata
-- `dns_discovered_child_names` — child names found by the scan
-- `dns_discovered_child_names_not_in_input` — live DNS names **not** listed in the input (strongest visibility-gap evidence)
-- `delegated_child_zones_not_in_input` — NS-based child zones not listed in the input
-- `evidence_support_level` — `strong` / `moderate` / `limited` / `none` / `inconclusive` support for the visibility-gap claim
-- `analysis_note` — plain-language comparison of input metadata vs live DNS findings
+- `known_domains_from_system` — from `known_fourth_level_domains` and `known_fifth_level_domains`
+- `known_domains_validated` — known input names confirmed in live DNS
+- `new_child_domains_found` — live DNS names **not** already in the input
+- `evidence_value` — `strong` / `moderate` / `limited` / `validation_only` / `context_only` / `none` / `inconclusive`
+- `analysis_note` — plain-language comparison of input vs live DNS findings
 
 **How to read evidence:**
 
-- **Strong:** delegated child zone or AXFR child name found that was not in the input child-domain fields.
-- **Moderate:** other DNS-discovered child activity not listed in the input.
-- **Limited:** base-zone evidence only, or DNS activity only on input-known child names.
-- **None / inconclusive:** no useful DNS evidence, or scan error — rerun before drawing conclusions.
+- **Strong:** new delegated child zone (NS/SOA) not already in the known-child fields
+- **Moderate:** new organizational/service child name (for example `police`, `portal`, `library`)
+- **Limited:** new generic/technical hostname (for example `www`, `autodiscover`, `mail`) or base-zone-only context
+- **validation_only:** known child confirmed in DNS — informational, not a new discovery
+- **None / inconclusive:** no useful child-domain evidence, or scan error — rerun before conclusions
 
-Lack of DNS-discovered names does **not** prove absence of activity. Scan a **small targeted subset** (not all ~2,000 domains) using the batch guidance above.
+Lack of discovered child names does **not** prove absence. Scan a **small targeted subset** using the scan profile guidance above.
 
 ## Windows EXE packaging
 

@@ -13,7 +13,11 @@ from tkinter import filedialog, messagebox, scrolledtext, ttk
 from scanner.export_service import export_results
 from scanner.models import CancellationToken, ScanInput, ScanOptions, ScanProfile, ScanProgressUpdate, ScanRunResult
 from scanner.paths import ensure_output_dir, get_default_output_dir, get_wordlists_dir
-from scanner.input_loader import load_domain_inputs
+from scanner.input_loader import (
+    PREFERRED_INPUT_FORMAT_NOTE,
+    RECOMMENDED_INPUT_COLUMNS_CSV,
+    load_domain_inputs,
+)
 from scanner.scan_engine import (
     apply_scan_profile,
     build_preflight_summary,
@@ -180,7 +184,12 @@ class DiscoveryApp(tk.Tk):
 
         preflight_frame = ttk.LabelFrame(main, text="Preflight Summary", padding=10)
         preflight_frame.pack(fill=tk.X, pady=(0, 10))
-        self.preflight_var = tk.StringVar(value="Select a domain list to view preflight estimate.")
+        self.preflight_var = tk.StringVar(
+            value=(
+                "Select a domain list to view preflight estimate.\n"
+                f"Recommended enriched CSV columns:\n  {RECOMMENDED_INPUT_COLUMNS_CSV}"
+            )
+        )
         ttk.Label(
             preflight_frame,
             textvariable=self.preflight_var,
@@ -477,10 +486,19 @@ class DiscoveryApp(tk.Tk):
         domain_column_line = ""
         if summary.selected_domain_column:
             domain_column_line = f"  Selected domain column: {summary.selected_domain_column}\n"
+        preferred_line = ""
+        if summary.preferred_input_format_detected:
+            preferred_line = "  Preferred input format detected.\n"
+        elif summary.input_file_type == "enriched_csv":
+            preferred_line = (
+                "  Recommended CSV columns: "
+                f"{RECOMMENDED_INPUT_COLUMNS_CSV}\n"
+            )
 
         self.preflight_var.set(
             "Preflight estimate — unknown child domain discovery:\n"
             f"  Goal: find child DNS names not already known in the system input.\n"
+            f"{preferred_line}"
             f"  Scan profile: {profile.value}\n"
             f"  Profile guidance: {profile_guidance(profile)}\n"
             f"  Domains loaded: {summary.domain_count}\n"

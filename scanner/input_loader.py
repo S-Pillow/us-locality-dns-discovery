@@ -63,6 +63,30 @@ KNOWN_CHILD_FIELD_KEYS = (
     "fifth_level_domains",
 )
 
+PREFERRED_ENRICHED_FIELDS = frozenset(
+    {
+        "domain",
+        "delegated_manager",
+        "known_fourth_level_domains",
+        "known_fifth_level_domains",
+        "fourth_level_count",
+        "fifth_level_count",
+    }
+)
+
+RECOMMENDED_INPUT_COLUMNS_CSV = (
+    "domain,delegated_manager,known_fourth_level_domains,"
+    "known_fifth_level_domains,fourth_level_count,fifth_level_count"
+)
+
+PREFERRED_INPUT_FORMAT_NOTE = (
+    "Recommended input CSV columns: domain, delegated_manager, "
+    "known_fourth_level_domains, known_fifth_level_domains, "
+    "fourth_level_count, fifth_level_count. The tool compares known domains "
+    "from the input against child DNS names discovered from live DNS. "
+    "Extra spreadsheet columns (zone, locality_label, notes, etc.) are not required."
+)
+
 
 @dataclass
 class DomainLoadResult:
@@ -77,7 +101,21 @@ class DomainLoadResult:
     selected_domain_column: str = ""
     sample_domains_preview: list[str] = field(default_factory=list)
     input_warnings: list[str] = field(default_factory=list)
+    preferred_input_format_detected: bool = False
     error: str | None = None
+
+
+def detect_preferred_input_format(
+    metadata_columns_detected: list[str],
+    domain_field: str | None,
+) -> bool:
+    """Return True when the simplified six-column enriched CSV format is detected."""
+    fields = set(metadata_columns_detected)
+    if domain_field:
+        fields.add(domain_field)
+    if "domain" not in fields:
+        return False
+    return PREFERRED_ENRICHED_FIELDS.issubset(fields)
 
 
 def normalize_header(header: str) -> str:
@@ -418,6 +456,7 @@ def _load_csv(path: Path) -> DomainLoadResult:
             (raw for raw, mapped in header_map.items() if mapped == domain_field),
             domain_field,
         )
+        preferred = detect_preferred_input_format(metadata_detected, domain_field)
         return DomainLoadResult(
             domains=domains,
             input_file_type="enriched_csv",
@@ -428,6 +467,7 @@ def _load_csv(path: Path) -> DomainLoadResult:
             selected_domain_column=selected_column,
             sample_domains_preview=[record.domain for record in domains[:5]],
             input_warnings=warnings,
+            preferred_input_format_detected=preferred,
         )
 
     records = []

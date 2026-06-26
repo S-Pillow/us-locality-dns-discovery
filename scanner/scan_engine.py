@@ -352,6 +352,7 @@ def build_preflight_summary(scan_input: ScanInput) -> PreflightSummary | None:
         selected_domain_column=loaded.selected_domain_column,
         sample_domains_preview=loaded.sample_domains_preview,
         input_warnings=loaded.input_warnings,
+        preferred_input_format_detected=loaded.preferred_input_format_detected,
     )
 
 
@@ -1475,6 +1476,7 @@ def run_scan(
         selected_domain_column=loaded.selected_domain_column,
         sample_domains_preview=loaded.sample_domains_preview,
         input_warnings=loaded.input_warnings,
+        preferred_input_format_detected=loaded.preferred_input_format_detected,
     )
 
     domain_names = [record.domain for record in loaded.domains]

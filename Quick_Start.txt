@@ -4,23 +4,37 @@
 Goal: scan known 3rd-level .US domains from our system and look for child DNS
 names beneath them that are not already known in the system.
 
+Recommended enriched CSV (six columns only):
+
+domain,delegated_manager,known_fourth_level_domains,known_fifth_level_domains,fourth_level_count,fifth_level_count
+state.wv.us,Example Manager,,,0,0
+auburn.in.us,Mirage Computers,ci.auburn.in.us,,1,0
+
+Column guide:
+* domain — known 3rd-level .US domain to scan (for example state.wv.us)
+* delegated_manager — manager/operator context
+* known_fourth_level_domains — 4th-level domains already in the system
+* known_fifth_level_domains — 5th-level domains already in the system
+* fourth_level_count / fifth_level_count — counts from the system (context)
+
+Leave known child fields blank if none are known. Do not include duplicate
+domain columns. Extra spreadsheet columns (zone, locality_label, notes, etc.)
+are not required.
+
 1. Run USLocalityDNSDiscovery.exe
    (Copy to a local folder if Windows SmartScreen blocks a network share.)
 
-2. Select input CSV or TXT
-   Prefer enriched CSV with columns: domain, known_fourth_level_domains,
-   known_fifth_level_domains, delegated_manager, zone.
+2. Select the simplified CSV, or TXT / simple CSV for domain-only lists.
 
 3. Choose Output Folder
    Default is output\ beside the EXE. Use Browse to pick another writable folder.
 
 4. Select scan profile
    Start with Light Evidence for a 10–25 domain sample (default).
-   Normal Evidence is for 3–10 domains. Deep Targeted is for 1–3 domains.
 
 5. Review Preflight Summary
-   Confirm selected domain column, first 5 domains, profile, output folder,
-   and candidate estimate.
+   Look for "Preferred input format detected" when using the six-column CSV.
+   Confirm selected domain column and first domains shown.
 
 6. Run Scan
    Watch the phase/progress text. Cancel Scan stays available during the run.
@@ -40,9 +54,9 @@ names beneath them that are not already known in the system.
 10. Use manual_verification_hint dig commands and verify selected rows.
 
 Important:
-- www / autodiscover / mail are included as DNS names but usually limited value.
-- No child names discovered does not prove absence.
-- The scan does not find every possible child domain.
-- A few good examples may be enough.
+* zone and second_level_domain are optional — workbook fields may be blank.
+* www / autodiscover / mail are included as DNS names but usually limited value.
+* No child names discovered does not prove absence.
+* A few good examples may be enough.
 
-See README.md for full evidence model, input columns, and handoff details.
+See README.md for full evidence model and handoff details.
