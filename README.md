@@ -340,10 +340,10 @@ Reports are written to the **selected Output Folder** (default shown in the GUI)
 
 | Sheet | Purpose |
 |-------|---------|
-| **Summary** | Full per-domain rollup with input metadata, DNS evidence counts, comparison fields, `evidence_support_level`, `recommended_review_action`, and `manual_verification_hint`. |
-| **Evidence Review** | **Open this first for coworker review.** Short prioritized view (strong → moderate → limited → inconclusive → none) with review actions and dig hints. |
-| **Findings** | Detailed rows for each discovered record, candidate test, or notable outcome (same columns as findings CSV). |
-| **Scan Settings** | Scan metadata, input file type, detected metadata columns, limitation notes, and recommended review path. |
+| **Evidence Review** | **Open this first for coworker review.** One row per base domain, sorted by `evidence_value` (strong → moderate → limited → etc.). |
+| **Summary** | Full per-domain rollup with `known_domains_from_system`, `new_child_domains_found`, `evidence_value`, and `manual_verification_hint`. |
+| **Findings** | Detailed rows per DNS finding with `discovered_name`, `known_domain`, `name_type`, and `evidence_value`. |
+| **Scan Settings** | Scan profile, input format, evidence model definitions, `packaged_mode`, and `output_folder`. |
 | **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
 
 Summary `scan_status` values use discovery-based wording such as *Possible delegated child zone discovered*, *DNS activity discovered*, *DNS activity discovered with scan errors*, *Base domain zone exists*, *Base domain records only*, *Scan incomplete / error*, *Scan errors only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
@@ -429,6 +429,7 @@ us_locality_dns_discovery/
 │   ├── scan_engine.py
 │   └── export_service.py
 ├── wordlists/
+│   ├── light_evidence.txt
 │   ├── rfc1480.txt
 │   ├── dns_common.txt
 │   ├── civic_departments.txt

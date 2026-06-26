@@ -59,4 +59,13 @@ Important:
 * No child names discovered does not prove absence.
 * A few good examples may be enough.
 
+Manual operator checklist (packaged EXE):
+* Browse — select domain list CSV/TXT
+* Output Folder → Browse — pick writable report folder (or use default beside EXE)
+* Output Folder → Open Folder — open selected folder after export
+* Scan Profile — Light Evidence (default) / Normal / Deep Targeted
+* Run Scan — watch phase/progress text
+* Cancel Scan — stop at next safe checkpoint if needed
+* Export Results — XLSX recommended; CSV/JSON/All also available
+
 See README.md for full evidence model and handoff details.
