@@ -1221,12 +1221,15 @@ def _test_candidates(
     candidates_offset: int,
     candidates_total: int,
     validate_fifth_level_parents: bool = False,
-    parent_validation_cache: set[str] | None = None,
+    parent_passed: set[str] | None = None,
+    parent_failed: set[str] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     subdelegation_count = 0
     candidate_record_count = 0
     tested = 0
+    skipped_fifth = 0
+    parent_skip_counts: dict[str, int] = {}
     if not candidates:
         return tested
 
@@ -1264,22 +1267,37 @@ def _test_candidates(
                     candidates_started=True,
                 )
 
-            if validate_fifth_level_parents and parent_validation_cache is not None:
+            if (
+                validate_fifth_level_parents
+                and parent_passed is not None
+                and parent_failed is not None
+            ):
                 parent = _implied_fourth_level_parent(candidate, domain)
                 if parent:
                     parent_key = _display_name(parent)
-                    if parent_key not in parent_validation_cache:
-                        parent_validation_cache.add(parent_key)
-                        if not _name_has_usable_findings(parent, result):
-                            _validate_fourth_level_parent(
-                                parent,
-                                domain=domain,
-                                resolver=resolver,
-                                result=result,
-                                wildcard_suspected=wildcard_suspected,
-                                progress=progress,
-                                messages=messages,
-                            )
+
+                    if parent_key in parent_failed:
+                        skipped_fifth += 1
+                        parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
+                        continue
+
+                    if parent_key not in parent_passed:
+                        found = _name_has_usable_findings(parent, result) or _validate_fourth_level_parent(
+                            parent,
+                            domain=domain,
+                            resolver=resolver,
+                            result=result,
+                            wildcard_suspected=wildcard_suspected,
+                            progress=progress,
+                            messages=messages,
+                        )
+                        if found:
+                            parent_passed.add(parent_key)
+                        else:
+                            parent_failed.add(parent_key)
+                            skipped_fifth += 1
+                            parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
+                            continue
 
             ns_findings, ns_candidate_errors = _query_records(
                 candidate,
@@ -1331,8 +1349,15 @@ def _test_candidates(
                     )
                 )
 
+    for parent_key, count in parent_skip_counts.items():
+        _emit(
+            f"  Skipped {count} 5th-level candidate(s) under {parent_key}: parent did not validate.",
+            progress,
+            messages,
+        )
+    skipped_note = f", {skipped_fifth} skipped (parent not validated)" if skipped_fifth else ""
     _emit(
-        f"  {phase.value}: {tested} tested, "
+        f"  {phase.value}: {tested} tested{skipped_note}, "
         f"{subdelegation_count} delegated child zone(s), "
         f"{candidate_record_count} DNS name(s) with records",
         progress,
@@ -1669,16 +1694,34 @@ def scan_domain(
     if fifth_candidates and not (cancel_check and cancel_check()):
         fifth_parents = _unique_fifth_level_parents(fifth_candidates, domain)
         fourth_tested_names = {_display_name(name) for name in fourth_candidates}
-        additional_parent_checks = len(fifth_parents - fourth_tested_names)
+
+        known_input_parents = {
+            _display_name(d)
+            for d in (input_record.known_fourth_level_domains if input_record else [])
+        }
+        parent_passed: set[str] = set()
+        parent_failed: set[str] = set()
+
+        for p in fifth_parents:
+            pk = _display_name(p)
+            if pk in known_input_parents:
+                parent_passed.add(pk)
+            elif pk in fourth_tested_names:
+                if _name_has_usable_findings(p, result):
+                    parent_passed.add(pk)
+                else:
+                    parent_failed.add(pk)
+
+        additional_parent_checks = len(fifth_parents) - len(parent_passed) - len(parent_failed)
         _emit(
-            "  5th-level parent validation: enabled "
+            "  5th-level parent gating: enabled "
             f"({len(fifth_parents)} unique parent name(s); "
-            f"{additional_parent_checks} additional direct check(s) beyond 4th-level candidates). "
-            "Parent names are checked once when deeper candidate names are tested.",
+            f"{len(parent_passed)} already known/validated; "
+            f"{additional_parent_checks} to check via DNS). "
+            "Deeper names are tested only when their 4th-level parent is known or validates in DNS.",
             progress,
             messages,
         )
-        parent_validation_cache: set[str] = set(fourth_tested_names)
         _emit_progress(
             progress_update,
             domain_index=domain_index,
@@ -1710,7 +1753,8 @@ def scan_domain(
             candidates_offset=fourth_tested,
             candidates_total=candidate_total,
             validate_fifth_level_parents=True,
-            parent_validation_cache=parent_validation_cache,
+            parent_passed=parent_passed,
+            parent_failed=parent_failed,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested

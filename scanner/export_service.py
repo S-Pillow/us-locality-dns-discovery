@@ -1898,7 +1898,9 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         (
             "fifth_level_parent_validation_note",
             (
-                "Parent 4th-level names are checked once when deeper candidate names are tested."
+                "5th-level parent gating: enabled. "
+                "Deeper names are tested only when their 4th-level parent is known from input or validates in DNS. "
+                "Parent names are checked once per scan domain."
                 if plan and (plan.fifth_level_enabled or plan.known_fifth_level_candidates > 0)
                 else ""
             ),
