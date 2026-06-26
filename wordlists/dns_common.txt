@@ -1,0 +1,17 @@
+www
+mail
+mx
+ns
+ns1
+ns2
+ftp
+webmail
+portal
+admin
+app
+dev
+test
+staging
+api
+vpn
+remote
