@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Callable
 
 import dns.exception
+import dns.flags
+import dns.message
+import dns.name
 import dns.query
+import dns.rcode
 import dns.rdatatype
 import dns.resolver
 import dns.zone
@@ -59,6 +63,10 @@ CANDIDATE_RECORD_TYPES = (
 FIFTH_LEVEL_BRANCHES = ("ci", "co")
 WILDCARD_PROBE_COUNT = 2
 LOW_CONFIDENCE_TYPES = {RecordType.A, RecordType.AAAA, RecordType.CNAME}
+SOA_AUTHORITY_NOTE = (
+    "SOA discovered; zone exists even though requested record type may have no direct answer."
+)
+SOA_MNAME_INDICATOR_NOTE = "authoritative indicator from SOA"
 
 # option field -> (log display name, wordlist filename)
 WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
@@ -369,6 +377,176 @@ def _format_rdata(record_type: RecordType, rdata) -> str:
     return rdata.to_text().rstrip(".")
 
 
+def _dns_name(fqdn: str) -> dns.name.Name:
+    return dns.name.from_text(_query_name(fqdn) + ".")
+
+
+def _names_match(left: str, right: str) -> bool:
+    return _display_name(left) == _display_name(right)
+
+
+def _send_dns_query(
+    fqdn: str,
+    record_type: RecordType,
+    resolver: dns.resolver.Resolver,
+) -> tuple[dns.message.Message | None, str | None]:
+    """Send a DNS query and return the full response message."""
+    qname = _dns_name(fqdn)
+    if not resolver.nameservers:
+        return None, f"{fqdn} {record_type.value}: no resolver nameservers configured"
+
+    query = dns.message.make_query(qname, record_type.value)
+    last_error: str | None = None
+    for nameserver in resolver.nameservers:
+        for query_fn in (dns.query.udp, dns.query.tcp):
+            try:
+                return query_fn(query, nameserver, timeout=DNS_TIMEOUT), None
+            except dns.exception.Timeout:
+                last_error = f"{fqdn} {record_type.value}: timeout via {nameserver}"
+            except OSError as exc:
+                last_error = f"{fqdn} {record_type.value}: {exc}"
+            except dns.exception.DNSException as exc:
+                last_error = f"{fqdn} {record_type.value}: {exc.__class__.__name__}"
+    return None, last_error
+
+
+def _soa_classification(fqdn: str, base_domain: str, from_authority: bool) -> FindingClassification:
+    if _names_match(fqdn, base_domain):
+        return FindingClassification.BASE_ZONE_EXISTS
+    if from_authority:
+        return FindingClassification.ZONE_SOA_DISCOVERED
+    return FindingClassification.ZONE_SOA_DISCOVERED
+
+
+def _append_soa_finding(
+    findings: list[DiscoveredRecord],
+    *,
+    fqdn: str,
+    base_domain: str,
+    rdata,
+    ttl: int | None,
+    source_method: str,
+    nameserver: str | None,
+    from_authority: bool,
+    authoritative_response: bool,
+) -> None:
+    classification = _soa_classification(fqdn, base_domain, from_authority)
+    confidence = "high" if authoritative_response else "medium"
+    value = _format_rdata(RecordType.SOA, rdata)
+    finding = DiscoveredRecord(
+        fqdn=_display_name(fqdn),
+        record_type=RecordType.SOA,
+        value=value,
+        source_method=source_method,
+        classification=classification,
+        confidence=confidence,
+        nameserver=nameserver,
+        ttl=ttl,
+    )
+    if not any(
+        item.fqdn == finding.fqdn
+        and item.record_type == finding.record_type
+        and item.value == finding.value
+        and item.classification == finding.classification
+        for item in findings
+    ):
+        findings.append(finding)
+
+
+def _parse_dns_response(
+    response: dns.message.Message,
+    fqdn: str,
+    record_type: RecordType,
+    *,
+    base_domain: str,
+    source_method: str,
+    classification: FindingClassification,
+    nameserver: str | None,
+    confidence: str = "normal",
+) -> list[DiscoveredRecord]:
+    """Extract ANSWER records and AUTHORITY-section SOA evidence from a DNS response."""
+    findings: list[DiscoveredRecord] = []
+    qname = _dns_name(fqdn)
+    authoritative_response = bool(response.flags & dns.flags.AA)
+    saw_soa_answer = False
+
+    for rrset in response.answer:
+        try:
+            parsed_type = RecordType(dns.rdatatype.to_text(rrset.rdtype))
+        except ValueError:
+            continue
+        if parsed_type == RecordType.SOA:
+            saw_soa_answer = True
+        ttl = rrset.ttl
+        for rdata in rrset:
+            if parsed_type == RecordType.SOA:
+                _append_soa_finding(
+                    findings,
+                    fqdn=_display_name(rrset.name.to_text()),
+                    base_domain=base_domain,
+                    rdata=rdata,
+                    ttl=ttl,
+                    source_method=source_method,
+                    nameserver=nameserver,
+                    from_authority=False,
+                    authoritative_response=authoritative_response,
+                )
+                continue
+            findings.append(
+                DiscoveredRecord(
+                    fqdn=_display_name(rrset.name.to_text()),
+                    record_type=parsed_type,
+                    value=_format_rdata(parsed_type, rdata),
+                    source_method=source_method,
+                    classification=classification,
+                    confidence="high" if authoritative_response else confidence,
+                    nameserver=nameserver,
+                    ttl=ttl,
+                )
+            )
+
+    if not saw_soa_answer:
+        for rrset in response.authority:
+            if rrset.rdtype != dns.rdatatype.SOA:
+                continue
+            if rrset.name != qname:
+                continue
+            for rdata in rrset:
+                _append_soa_finding(
+                    findings,
+                    fqdn=_display_name(rrset.name.to_text()),
+                    base_domain=base_domain,
+                    rdata=rdata,
+                    ttl=rrset.ttl,
+                    source_method=source_method,
+                    nameserver=nameserver,
+                    from_authority=True,
+                    authoritative_response=authoritative_response,
+                )
+
+    return findings
+
+
+def _extract_soa_mname_hosts(domain_result: DomainScanResult) -> list[str]:
+    """Return SOA MNAME hostnames discovered for the base domain."""
+    hosts: list[str] = []
+    for record in domain_result.records:
+        if record.record_type != RecordType.SOA:
+            continue
+        if not _names_match(record.fqdn, domain_result.domain):
+            continue
+        if record.classification not in {
+            FindingClassification.BASE_ZONE_EXISTS,
+            FindingClassification.BASE_DOMAIN_RECORD,
+            FindingClassification.ZONE_SOA_DISCOVERED,
+        }:
+            continue
+        mname = record.value.split()[0].rstrip(".")
+        if mname:
+            hosts.append(_query_name(mname))
+    return list(dict.fromkeys(hosts))
+
+
 def _query_records(
     fqdn: str,
     record_types: tuple[RecordType, ...],
@@ -377,42 +555,57 @@ def _query_records(
     classification: FindingClassification,
     nameserver: str | None = None,
     confidence: str = "normal",
+    base_domain: str | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
     findings: list[DiscoveredRecord] = []
     errors: list[str] = []
     qname = _query_name(fqdn)
+    zone_base = _display_name(base_domain or fqdn)
 
     for record_type in record_types:
-        try:
-            answers = resolver.resolve(qname, record_type.value)
-            ttl = answers.rrset.ttl if answers.rrset is not None else None
-            for rdata in answers:
-                findings.append(
-                    DiscoveredRecord(
-                        fqdn=_display_name(qname),
-                        record_type=record_type,
-                        value=_format_rdata(record_type, rdata),
-                        source_method=source_method,
-                        classification=classification,
-                        confidence=confidence,
-                        nameserver=nameserver,
-                        ttl=ttl,
-                    )
-                )
-        except dns.resolver.NXDOMAIN:
+        response, transport_error = _send_dns_query(fqdn, record_type, resolver)
+        if transport_error:
+            if "timeout" in transport_error.lower():
+                errors.append(transport_error)
+            elif "no resolver" in transport_error.lower():
+                errors.append(transport_error)
+            else:
+                errors.append(transport_error)
             continue
-        except dns.resolver.NoAnswer:
+        if response is None:
             continue
-        except dns.resolver.NoNameservers:
-            errors.append(f"{qname} {record_type.value}: no nameservers")
-        except (dns.exception.Timeout, dns.resolver.LifetimeTimeout):
-            errors.append(f"{qname} {record_type.value}: timeout")
-        except dns.resolver.NoMetaqueries:
-            continue
-        except dns.exception.DNSException as exc:
-            errors.append(f"{qname} {record_type.value}: {exc.__class__.__name__}")
 
-    return findings, errors
+        rcode = response.rcode()
+        if rcode not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+            errors.append(f"{qname} {record_type.value}: {dns.rcode.to_text(rcode)}")
+            continue
+
+        parsed = _parse_dns_response(
+            response,
+            fqdn,
+            record_type,
+            base_domain=zone_base,
+            source_method=source_method,
+            classification=classification,
+            nameserver=nameserver,
+            confidence=confidence,
+        )
+        findings.extend(parsed)
+
+    deduped: list[DiscoveredRecord] = []
+    seen: set[tuple[str, str | None, str, str]] = set()
+    for item in findings:
+        key = (
+            item.fqdn,
+            item.record_type.value if item.record_type else None,
+            item.value,
+            item.classification.value,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped, errors
 
 
 def _resolve_nameserver_ips(ns_host: str) -> list[str]:
@@ -428,6 +621,84 @@ def _resolve_nameserver_ips(ns_host: str) -> list[str]:
     return list(dict.fromkeys(ips))
 
 
+def _dedupe_records(records: list[DiscoveredRecord]) -> list[DiscoveredRecord]:
+    deduped: list[DiscoveredRecord] = []
+    seen: set[tuple[str, str | None, str, str]] = set()
+    for item in records:
+        key = (
+            item.fqdn,
+            item.record_type.value if item.record_type else None,
+            item.value,
+            item.classification.value,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _parent_domain(domain: str) -> str | None:
+    labels = _display_name(domain).split(".")
+    if len(labels) < 3:
+        return None
+    return ".".join(labels[1:])
+
+
+def _nameservers_from_response_answer(response: dns.message.Message, base_domain: str) -> list[str]:
+    hosts: list[str] = []
+    qname = _dns_name(base_domain)
+    for rrset in response.answer:
+        if rrset.rdtype != dns.rdatatype.NS:
+            continue
+        if rrset.name != qname:
+            continue
+        for rdata in rrset:
+            hosts.append(_query_name(rdata.target.to_text()))
+    return list(dict.fromkeys(hosts))
+
+
+def discover_delegation_nameservers(base_domain: str) -> tuple[list[str], list[DiscoveredRecord], list[str]]:
+    """Try parent-zone authoritative servers for child NS delegation."""
+    parent = _parent_domain(base_domain)
+    if not parent:
+        return [], [], []
+
+    parent_ns_hosts, _, parent_errors = discover_authoritative_nameservers(parent)
+    findings: list[DiscoveredRecord] = []
+    errors: list[str] = list(parent_errors)
+    child_ns: list[str] = []
+
+    for ns_host in parent_ns_hosts:
+        for ns_ip in _resolve_nameserver_ips(ns_host):
+            response, transport_error = _send_dns_query(
+                base_domain,
+                RecordType.NS,
+                _make_resolver(ns_ip),
+            )
+            if transport_error or response is None:
+                if transport_error:
+                    errors.append(transport_error)
+                continue
+            if response.rcode() not in (dns.rcode.NOERROR, dns.rcode.NXDOMAIN):
+                continue
+            child_ns.extend(_nameservers_from_response_answer(response, base_domain))
+            parsed = _parse_dns_response(
+                response,
+                base_domain,
+                RecordType.NS,
+                base_domain=base_domain,
+                source_method="parent_authoritative_nameserver",
+                classification=FindingClassification.AUTHORITATIVE_NS,
+                nameserver=f"{ns_host} ({ns_ip})",
+            )
+            findings.extend(
+                item for item in parsed if _names_match(item.fqdn, base_domain)
+            )
+
+    return list(dict.fromkeys(child_ns)), _dedupe_records(findings), errors
+
+
 def discover_authoritative_nameservers(base_domain: str) -> tuple[list[str], list[DiscoveredRecord], list[str]]:
     """Return NS hostnames plus discovery records and any query errors."""
     resolver = _make_resolver()
@@ -437,6 +708,7 @@ def discover_authoritative_nameservers(base_domain: str) -> tuple[list[str], lis
         resolver,
         source_method="recursive_resolver",
         classification=FindingClassification.AUTHORITATIVE_NS,
+        base_domain=base_domain,
     )
     ns_hosts = [_query_name(finding.value) for finding in findings if finding.record_type == RecordType.NS]
     return list(dict.fromkeys(ns_hosts)), findings, errors
@@ -503,6 +775,7 @@ def _wildcard_probe(base_domain: str) -> tuple[bool, list[str]]:
                 resolver,
                 source_method="wildcard_probe",
                 classification=FindingClassification.STANDARD_RECORD,
+                base_domain=base,
             )
             for item in found:
                 hits.append(f"{item.record_type.value}={item.value}")
@@ -526,7 +799,7 @@ def _confidence_for(
 ) -> str:
     if wildcard_suspected and record_type in LOW_CONFIDENCE_TYPES and classification in {
         FindingClassification.STANDARD_RECORD,
-        FindingClassification.POSSIBLE_SUBDELEGATION,
+        FindingClassification.DELEGATED_CHILD_ZONE,
     }:
         return "low"
     return "normal"
@@ -580,18 +853,35 @@ def scan_domain(
         resolver,
         source_method="recursive_resolver",
         classification=FindingClassification.BASE_DOMAIN_RECORD,
+        base_domain=domain,
     )
     result.records.extend(base_findings)
 
-    if base_findings:
-        _emit(f"  Base domain: {len(base_findings)} record(s) discovered", progress, messages)
-        for item in base_findings:
+    base_zone_findings = [
+        item
+        for item in base_findings
+        if item.classification == FindingClassification.BASE_ZONE_EXISTS
+        or (item.record_type == RecordType.SOA and _names_match(item.fqdn, domain))
+    ]
+    other_base_findings = [item for item in base_findings if item not in base_zone_findings]
+
+    if base_zone_findings:
+        for item in base_zone_findings:
+            _emit(
+                f"    [{item.classification.value}] {item.fqdn} SOA {item.value} "
+                f"({SOA_AUTHORITY_NOTE})",
+                progress,
+                messages,
+            )
+    if other_base_findings:
+        _emit(f"  Base domain: {len(other_base_findings)} record(s) discovered", progress, messages)
+        for item in other_base_findings:
             _emit(
                 f"    [{item.classification.value}] {item.fqdn} {item.record_type.value} {item.value}",
                 progress,
                 messages,
             )
-    else:
+    if not base_findings:
         _emit(
             f"  Base domain: No records discovered using tested methods for {domain}",
             progress,
@@ -612,20 +902,49 @@ def scan_domain(
         )
 
     ns_hosts, ns_findings, ns_errors = discover_authoritative_nameservers(domain)
+    if not ns_hosts:
+        delegated_ns, delegated_findings, delegated_errors = discover_delegation_nameservers(domain)
+        if delegated_ns:
+            ns_hosts = delegated_ns
+            _emit(
+                f"  Authoritative nameservers discovered via parent-zone delegation lookup: "
+                f"{', '.join(ns_hosts)}",
+                progress,
+                messages,
+            )
+        for item in delegated_findings:
+            if item not in result.records:
+                result.records.append(item)
+        for error in delegated_errors:
+            _emit(f"  Parent delegation NS lookup error: {error}", progress, messages)
+
     for item in ns_findings:
         if item not in result.records:
             result.records.append(item)
     for error in ns_errors:
         _emit(f"  Authoritative NS lookup error: {error}", progress, messages)
 
-    if ns_hosts:
-        _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
+    if not ns_hosts:
+        soa_mname_hosts = _extract_soa_mname_hosts(result)
+        if soa_mname_hosts:
+            ns_hosts = soa_mname_hosts
+            _emit(
+                f"  Authoritative nameservers: none in NS answers; "
+                f"using {SOA_MNAME_INDICATOR_NOTE}: {', '.join(ns_hosts)}",
+                progress,
+                messages,
+            )
+            result.notes.append(
+                f"Authoritative indicator from SOA MNAME: {', '.join(ns_hosts)}"
+            )
+        else:
+            _emit(
+                f"  Authoritative nameservers: No records discovered using tested methods for {domain}",
+                progress,
+                messages,
+            )
     else:
-        _emit(
-            f"  Authoritative nameservers: No records discovered using tested methods for {domain}",
-            progress,
-            messages,
-        )
+        _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
 
     if options.query_authoritative_ns and ns_hosts:
         for ns_host in ns_hosts:
@@ -642,6 +961,7 @@ def scan_domain(
                     source_method="authoritative_nameserver",
                     classification=FindingClassification.BASE_DOMAIN_RECORD,
                     nameserver=f"{ns_host} ({ns_ip})",
+                    base_domain=domain,
                 )
                 if auth_findings:
                     _emit(
@@ -732,7 +1052,8 @@ def scan_domain(
             (RecordType.NS,),
             resolver,
             source_method="generated_candidate",
-            classification=FindingClassification.POSSIBLE_SUBDELEGATION,
+            classification=FindingClassification.DELEGATED_CHILD_ZONE,
+            base_domain=domain,
         )
         if ns_findings:
             subdelegation_count += 1
@@ -742,7 +1063,7 @@ def scan_domain(
                 )
                 result.records.append(item)
             _emit(
-                f"    Possible subdelegation: {candidate} NS {', '.join(item.value for item in ns_findings)}",
+                f"    Delegated child zone: {candidate} NS {', '.join(item.value for item in ns_findings)}",
                 progress,
                 messages,
             )
@@ -753,6 +1074,7 @@ def scan_domain(
             resolver,
             source_method="generated_candidate",
             classification=FindingClassification.STANDARD_RECORD,
+            base_domain=domain,
         )
         for item in other_findings:
             item.confidence = _confidence_for(
@@ -779,8 +1101,8 @@ def scan_domain(
 
     _emit(
         f"  Candidate summary: {candidates_tested} tested, "
-        f"{subdelegation_count} possible subdelegation(s), "
-        f"{candidate_record_count} other record(s), "
+        f"{subdelegation_count} delegated child zone(s), "
+        f"{candidate_record_count} DNS name(s) with records, "
         f"{empty_candidates} with no records discovered using tested methods",
         progress,
         messages,
@@ -792,6 +1114,8 @@ def scan_domain(
             progress,
             messages,
         )
+
+    result.records = _dedupe_records(result.records)
 
     _emit(f"--- Completed {domain} ---", progress, messages)
     result.candidates_tested = candidates_tested or len(candidates)
@@ -874,11 +1198,22 @@ def run_scan(
                 _emit(PARTIAL_SCAN_MESSAGE, progress_callback, messages)
                 break
         except Exception as exc:  # noqa: BLE001 — keep GUI alive on unexpected errors
+            error_message = f"Scan interrupted by unexpected error: {exc}"
             _emit(f"Unexpected error scanning {domain}: {exc.__class__.__name__}: {exc}", progress_callback, messages)
             result.domain_results.append(
                 DomainScanResult(
                     domain=domain,
-                    notes=[f"Scan interrupted by unexpected error: {exc}"],
+                    scan_failed=True,
+                    notes=[error_message],
+                    records=[
+                        DiscoveredRecord(
+                            fqdn=domain,
+                            record_type=None,
+                            value=str(exc),
+                            source_method="scan_engine",
+                            classification=FindingClassification.SCAN_ERROR,
+                        )
+                    ],
                 )
             )
 

@@ -44,6 +44,12 @@ PARTIAL_SCAN_NOTE = (
     "This scan was cancelled before all domains were completed. Results are partial."
 )
 
+SCAN_ERROR_NOTE = "Domain status is incomplete/error; rerun recommended."
+
+SOA_FINDING_NOTE = (
+    "SOA discovered; zone exists even though requested record type may have no direct answer."
+)
+
 CSV_COLUMNS = [
     "scan_timestamp",
     "base_domain",
@@ -69,8 +75,10 @@ SUMMARY_COLUMNS = [
     "authoritative_nameservers",
     "axfr_status",
     "wildcard_suspected",
+    "base_zone_exists",
     "base_records_found",
-    "possible_subdelegations_found",
+    "delegated_child_zones_found",
+    "dns_names_with_records_found",
     "standard_records_found",
     "candidate_names_tested",
     "wordlist_sources",
@@ -90,19 +98,28 @@ ERRORS_WARNINGS_COLUMNS = [
 ]
 
 SCAN_STATUS_AXFR = "AXFR allowed"
-SCAN_STATUS_SUBDELEGATION = "Possible subdelegation discovered"
+SCAN_STATUS_DELEGATED_CHILD = "Possible delegated child zone discovered"
+SCAN_STATUS_DNS_ACTIVITY_WITH_ERRORS = "DNS activity discovered with scan errors"
 SCAN_STATUS_DNS_ACTIVITY = "DNS activity discovered"
+SCAN_STATUS_BASE_ZONE_EXISTS = "Base domain zone exists"
 SCAN_STATUS_BASE_ONLY = "Base domain records only"
-SCAN_STATUS_NO_RECORDS = "No records discovered using tested methods"
+SCAN_STATUS_INCOMPLETE = "Scan incomplete / error"
 SCAN_STATUS_ERRORS_ONLY = "Scan errors only"
+SCAN_STATUS_NO_RECORDS = "No records discovered using tested methods"
+
+# Legacy alias used in a few internal references.
+SCAN_STATUS_SUBDELEGATION = SCAN_STATUS_DELEGATED_CHILD
 
 SUMMARY_STATUS_FILLS = {
     SCAN_STATUS_AXFR: PatternFill(fill_type="solid", fgColor="C6EFCE"),
-    SCAN_STATUS_SUBDELEGATION: PatternFill(fill_type="solid", fgColor="BDD7EE"),
+    SCAN_STATUS_DELEGATED_CHILD: PatternFill(fill_type="solid", fgColor="BDD7EE"),
+    SCAN_STATUS_DNS_ACTIVITY_WITH_ERRORS: PatternFill(fill_type="solid", fgColor="F4B084"),
     SCAN_STATUS_DNS_ACTIVITY: PatternFill(fill_type="solid", fgColor="FFE699"),
+    SCAN_STATUS_BASE_ZONE_EXISTS: PatternFill(fill_type="solid", fgColor="D9E1F2"),
     SCAN_STATUS_BASE_ONLY: PatternFill(fill_type="solid", fgColor="EDEDED"),
-    SCAN_STATUS_NO_RECORDS: PatternFill(fill_type="solid", fgColor="F8CBAD"),
+    SCAN_STATUS_INCOMPLETE: PatternFill(fill_type="solid", fgColor="FFC7CE"),
     SCAN_STATUS_ERRORS_ONLY: PatternFill(fill_type="solid", fgColor="FFC7CE"),
+    SCAN_STATUS_NO_RECORDS: PatternFill(fill_type="solid", fgColor="F8CBAD"),
 }
 
 ExportFormat = Literal["xlsx", "csv", "json", "all"]
@@ -173,32 +190,93 @@ def _map_source(record: DiscoveredRecord) -> str:
     return mapping.get(record.source_method, record.source_method)
 
 
+def _domain_has_scan_error(domain_result: DomainScanResult) -> bool:
+    if domain_result.scan_failed:
+        return True
+    if any(record.classification == FindingClassification.SCAN_ERROR for record in domain_result.records):
+        return True
+    return any(
+        "unexpected error" in note.lower() or "interrupted" in note.lower()
+        for note in domain_result.notes
+    )
+
+
+def _is_dns_activity_record(record: DiscoveredRecord) -> bool:
+    if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+        return False
+    if record.classification in {
+        FindingClassification.BASE_ZONE_EXISTS,
+        FindingClassification.ZONE_SOA_DISCOVERED,
+        FindingClassification.STANDARD_RECORD,
+    }:
+        return True
+    if record.classification == FindingClassification.BASE_DOMAIN_RECORD:
+        return record.record_type is not None and record.record_type.value != "NS"
+    return False
+
+
 def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
     counts = {
         "total_findings": 0,
         "base_domain_records": 0,
         "authoritative_ns": 0,
-        "possible_subdelegations": 0,
+        "base_zone_exists": 0,
+        "delegated_child_zones": 0,
+        "dns_names_with_records": 0,
         "standard_records": 0,
         "axfr_success": 0,
         "axfr_blocked": 0,
         "query_errors": 0,
+        "scan_errors": 0,
         "candidates_tested": domain_result.candidates_tested,
     }
+    dns_activity_names: set[str] = set()
+    delegated_names: set[str] = set()
+    base_has_zone = False
+
     for record in domain_result.records:
         counts["total_findings"] += 1
         key_map = {
             FindingClassification.BASE_DOMAIN_RECORD: "base_domain_records",
+            FindingClassification.BASE_ZONE_EXISTS: "base_zone_exists",
             FindingClassification.AUTHORITATIVE_NS: "authoritative_ns",
-            FindingClassification.POSSIBLE_SUBDELEGATION: "possible_subdelegations",
+            FindingClassification.DELEGATED_CHILD_ZONE: "delegated_child_zones",
             FindingClassification.STANDARD_RECORD: "standard_records",
             FindingClassification.AXFR_SUCCESS: "axfr_success",
             FindingClassification.AXFR_BLOCKED: "axfr_blocked",
             FindingClassification.QUERY_ERROR: "query_errors",
+            FindingClassification.SCAN_ERROR: "scan_errors",
         }
         bucket = key_map.get(record.classification)
         if bucket:
             counts[bucket] += 1
+        if record.classification == FindingClassification.ZONE_SOA_DISCOVERED:
+            if record.fqdn == domain_result.domain:
+                counts["base_zone_exists"] += 1
+
+        if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+            delegated_names.add(record.fqdn)
+        elif _is_dns_activity_record(record):
+            dns_activity_names.add(record.fqdn)
+
+        if record.classification == FindingClassification.BASE_ZONE_EXISTS and record.fqdn == domain_result.domain:
+            base_has_zone = True
+        if (
+            record.record_type is not None
+            and record.record_type.value == "SOA"
+            and record.fqdn == domain_result.domain
+            and record.classification
+            in {
+                FindingClassification.BASE_ZONE_EXISTS,
+                FindingClassification.BASE_DOMAIN_RECORD,
+                FindingClassification.ZONE_SOA_DISCOVERED,
+            }
+        ):
+            base_has_zone = True
+
+    counts["delegated_child_zones"] = len(delegated_names)
+    counts["dns_names_with_records"] = len(dns_activity_names)
+    counts["base_zone_exists_flag"] = 1 if base_has_zone else 0
     return counts
 
 
@@ -239,11 +317,45 @@ def _authoritative_nameservers(domain_result: DomainScanResult) -> list[str]:
     for record in domain_result.records:
         if record.classification == FindingClassification.AUTHORITATIVE_NS and record.record_type:
             names.append(record.value.rstrip("."))
+
+    if not names:
+        for record in domain_result.records:
+            if record.fqdn != domain_result.domain:
+                continue
+            if record.record_type is None or record.record_type.value != "SOA":
+                continue
+            if record.classification not in {
+                FindingClassification.BASE_ZONE_EXISTS,
+                FindingClassification.BASE_DOMAIN_RECORD,
+                FindingClassification.ZONE_SOA_DISCOVERED,
+            }:
+                continue
+            mname = record.value.split()[0].rstrip(".")
+            if mname:
+                names.append(f"{mname} (authoritative indicator from SOA)")
+
     return list(dict.fromkeys(names))
 
 
+def _should_emit_no_records_row(domain_result: DomainScanResult, counts: dict[str, int]) -> bool:
+    if _domain_has_scan_error(domain_result):
+        return False
+    if counts["base_zone_exists_flag"]:
+        return False
+    if counts["delegated_child_zones"] > 0 or counts["dns_names_with_records"] > 0:
+        return False
+    if counts["base_domain_records"] > 0 or counts["authoritative_ns"] > 0:
+        return False
+    if counts["axfr_success"] > 0:
+        return False
+    return True
+
+
 def _include_record_in_export(record: DiscoveredRecord, base_domain: str) -> bool:
-    if record.classification == FindingClassification.QUERY_ERROR:
+    if record.classification in {
+        FindingClassification.QUERY_ERROR,
+        FindingClassification.SCAN_ERROR,
+    }:
         return record.fqdn == base_domain
     return True
 
@@ -257,9 +369,23 @@ def _record_type_text(record: DiscoveredRecord) -> str:
 
 
 def _record_error(record: DiscoveredRecord) -> str:
-    if record.classification == FindingClassification.QUERY_ERROR:
+    if record.classification in {
+        FindingClassification.QUERY_ERROR,
+        FindingClassification.SCAN_ERROR,
+    }:
         return record.value
     return ""
+
+
+def _finding_notes(record: DiscoveredRecord, base_notes: str) -> str:
+    if record.classification in {
+        FindingClassification.BASE_ZONE_EXISTS,
+        FindingClassification.ZONE_SOA_DISCOVERED,
+    }:
+        return f"{SOA_FINDING_NOTE} {base_notes}".strip()
+    if record.classification == FindingClassification.SCAN_ERROR:
+        return f"{SCAN_ERROR_NOTE} {base_notes}".strip()
+    return base_notes
 
 
 def _record_value(record: DiscoveredRecord) -> str:
@@ -277,20 +403,43 @@ def _base_has_discovered_records(domain_result: DomainScanResult) -> bool:
         if record.classification in {
             FindingClassification.BASE_DOMAIN_RECORD,
             FindingClassification.AUTHORITATIVE_NS,
+            FindingClassification.BASE_ZONE_EXISTS,
+            FindingClassification.ZONE_SOA_DISCOVERED,
         }:
             return True
     return False
 
 
 def _determine_scan_status(domain_result: DomainScanResult, counts: dict[str, int]) -> str:
+    has_error = _domain_has_scan_error(domain_result)
+    has_delegated = counts["delegated_child_zones"] > 0
+    has_dns = counts["dns_names_with_records"] > 0
+    has_base_zone = bool(counts["base_zone_exists_flag"])
+    has_base_records = counts["base_domain_records"] > 0 or counts["authoritative_ns"] > 0
+    has_meaningful = (
+        has_delegated
+        or has_dns
+        or has_base_zone
+        or has_base_records
+        or counts["axfr_success"] > 0
+    )
+
     if counts["axfr_success"] > 0:
         return SCAN_STATUS_AXFR
-    if counts["possible_subdelegations"] > 0:
-        return SCAN_STATUS_SUBDELEGATION
-    if counts["standard_records"] > 0:
+    if has_delegated:
+        return SCAN_STATUS_DELEGATED_CHILD
+    if has_error and has_dns:
+        return SCAN_STATUS_DNS_ACTIVITY_WITH_ERRORS
+    if has_dns:
         return SCAN_STATUS_DNS_ACTIVITY
-    if counts["base_domain_records"] > 0 or counts["authoritative_ns"] > 0:
+    if has_base_zone:
+        return SCAN_STATUS_BASE_ZONE_EXISTS
+    if has_base_records:
         return SCAN_STATUS_BASE_ONLY
+    if has_error:
+        if has_meaningful or domain_result.candidates_tested > 0:
+            return SCAN_STATUS_INCOMPLETE
+        return SCAN_STATUS_INCOMPLETE if domain_result.scan_failed else SCAN_STATUS_ERRORS_ONLY
     if counts["query_errors"] > 0 and counts["total_findings"] == counts["query_errors"]:
         return SCAN_STATUS_ERRORS_ONLY
     return SCAN_STATUS_NO_RECORDS
@@ -299,46 +448,89 @@ def _determine_scan_status(domain_result: DomainScanResult, counts: dict[str, in
 def _evidence_summary(domain_result: DomainScanResult, counts: dict[str, int]) -> str:
     parts: list[str] = []
 
+    if _domain_has_scan_error(domain_result):
+        parts.append("Scan incomplete due to error; rerun recommended.")
+
     if counts["axfr_success"] > 0:
         parts.append(f"AXFR succeeded with {counts['axfr_success']} record(s) discovered using tested methods")
 
-    subdelegations = [
+    delegated = [
         record.fqdn
         for record in domain_result.records
-        if record.classification == FindingClassification.POSSIBLE_SUBDELEGATION
+        if record.classification == FindingClassification.DELEGATED_CHILD_ZONE
     ]
-    if subdelegations:
-        unique = list(dict.fromkeys(subdelegations))[:5]
-        suffix = "..." if len(subdelegations) > 5 else ""
-        parts.append(f"Possible subdelegation at {', '.join(unique)}{suffix}")
+    if delegated:
+        unique = list(dict.fromkeys(delegated))[:5]
+        suffix = "..." if len(delegated) > 5 else ""
+        sample = unique[0]
+        if len(unique) == 1:
+            parts.append(f"Delegated child zone discovered: {sample} has NS records.")
+        else:
+            parts.append(f"Delegated child zones discovered: {', '.join(unique)}{suffix}")
 
-    standard = [
+    dns_names = sorted(
+        {
+            record.fqdn
+            for record in domain_result.records
+            if _is_dns_activity_record(record) and not (
+                record.fqdn == domain_result.domain
+                and record.classification == FindingClassification.BASE_ZONE_EXISTS
+            )
+        }
+    )
+    if dns_names:
+        examples = dns_names[:3]
+        suffix = "..." if len(dns_names) > 3 else ""
+        parts.append(
+            f"DNS activity discovered: {', '.join(examples)}{suffix} has A/CNAME/MX/TXT/SOA or related records."
+        )
+
+    base_soa = [
         record
         for record in domain_result.records
-        if record.classification == FindingClassification.STANDARD_RECORD
+        if record.fqdn == domain_result.domain
+        and record.record_type is not None
+        and record.record_type.value == "SOA"
     ]
-    if standard:
-        examples = list(dict.fromkeys(f"{item.fqdn} {item.record_type.value if item.record_type else ''}".strip() for item in standard))[:3]
-        parts.append(f"Candidate DNS activity: {', '.join(examples)}")
+    apex_a = [
+        record
+        for record in domain_result.records
+        if record.fqdn == domain_result.domain
+        and record.record_type is not None
+        and record.record_type.value == "A"
+    ]
+    if base_soa and not apex_a:
+        parts.append("SOA discovered for base zone; no apex A record found.")
+    elif base_soa:
+        parts.append("SOA discovered for base zone.")
 
     base_records = [
         record
         for record in domain_result.records
-        if record.classification == FindingClassification.BASE_DOMAIN_RECORD and record.fqdn == domain_result.domain
+        if record.classification == FindingClassification.BASE_DOMAIN_RECORD
+        and record.fqdn == domain_result.domain
+        and record.record_type is not None
+        and record.record_type.value != "SOA"
     ]
     if base_records:
-        examples = list(dict.fromkeys(
-            f"{item.record_type.value if item.record_type else 'record'}={item.value[:60]}"
-            for item in base_records
-        ))[:4]
+        examples = list(
+            dict.fromkeys(
+                f"{item.record_type.value if item.record_type else 'record'}={item.value[:60]}"
+                for item in base_records
+            )
+        )[:4]
         parts.append(f"Base domain records: {', '.join(examples)}")
 
     if domain_result.notes:
-        parts.extend(note for note in domain_result.notes if "No records discovered" in note)
+        for note in domain_result.notes:
+            if "authoritative indicator from soa" in note.lower():
+                parts.append(note)
+            elif "No records discovered" in note and not parts:
+                parts.append(note)
 
     if not parts:
-        return "No records discovered using tested methods"
-    return "; ".join(parts)
+        return "No records discovered using selected wordlists and tested methods."
+    return "; ".join(dict.fromkeys(parts))
 
 
 def build_findings_rows(result: ScanRunResult) -> list[dict[str, str]]:
@@ -357,8 +549,9 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
     for domain_result in result.domain_results:
         axfr_status = _domain_axfr_status(domain_result, axfr_enabled)
         wildcard = "true" if domain_result.wildcard_suspected else "false"
+        counts = _domain_summary_counts(domain_result)
 
-        if not _base_has_discovered_records(domain_result):
+        if _should_emit_no_records_row(domain_result, counts):
             rows.append(
                 {
                     "scan_timestamp": scan_timestamp,
@@ -399,7 +592,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "axfr_status": axfr_status,
                     "error": _record_error(record),
                     "wordlist_sources": wordlist_sources,
-                    "notes": notes,
+                    "notes": _finding_notes(record, notes),
                 }
             )
 
@@ -423,8 +616,10 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "authoritative_nameservers": "; ".join(_authoritative_nameservers(domain_result)),
                 "axfr_status": _domain_axfr_status(domain_result, axfr_enabled),
                 "wildcard_suspected": "true" if domain_result.wildcard_suspected else "false",
+                "base_zone_exists": "true" if counts["base_zone_exists_flag"] else "false",
                 "base_records_found": str(counts["base_domain_records"] + counts["authoritative_ns"]),
-                "possible_subdelegations_found": str(counts["possible_subdelegations"]),
+                "delegated_child_zones_found": str(counts["delegated_child_zones"]),
+                "dns_names_with_records_found": str(counts["dns_names_with_records"]),
                 "standard_records_found": str(counts["standard_records"]),
                 "candidate_names_tested": str(counts["candidates_tested"]),
                 "wordlist_sources": wordlist_sources,
@@ -574,8 +769,28 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     }
                 )
 
+            if record.classification == FindingClassification.SCAN_ERROR and record.fqdn == domain_result.domain:
+                rows.append(
+                    {
+                        "scan_timestamp": scan_timestamp,
+                        "base_domain": domain_result.domain,
+                        "warning_type": "scan_error",
+                        "tested_name": record.fqdn,
+                        "record_type": "",
+                        "nameserver": "",
+                        "message": record.value,
+                        "notes": SCAN_ERROR_NOTE,
+                    }
+                )
+
         for note in domain_result.notes:
             if "unexpected error" in note.lower() or "interrupted" in note.lower():
+                if any(
+                    row.get("base_domain") == domain_result.domain
+                    and row.get("warning_type") == "scan_error"
+                    for row in rows
+                ):
+                    continue
                 rows.append(
                     {
                         "scan_timestamp": scan_timestamp,
@@ -585,7 +800,7 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                         "record_type": "",
                         "nameserver": "",
                         "message": note,
-                        "notes": DISCOVERY_LIMITATION,
+                        "notes": SCAN_ERROR_NOTE,
                     }
                 )
 
@@ -597,7 +812,10 @@ def _finding_to_dict(
     base_domain: str,
     include_errors: bool,
 ) -> dict | None:
-    if record.classification == FindingClassification.QUERY_ERROR:
+    if record.classification in {
+        FindingClassification.QUERY_ERROR,
+        FindingClassification.SCAN_ERROR,
+    }:
         if not include_errors or record.fqdn != base_domain:
             return None
         return {
@@ -651,8 +869,9 @@ def build_json_document(result: ScanRunResult) -> dict:
     for domain_result in result.domain_results:
         findings: list[dict] = []
         errors: list[str] = []
+        counts = _domain_summary_counts(domain_result)
 
-        if not _base_has_discovered_records(domain_result):
+        if _should_emit_no_records_row(domain_result, counts):
             findings.append(
                 {
                     "tested_name": domain_result.domain,
@@ -668,7 +887,10 @@ def build_json_document(result: ScanRunResult) -> dict:
             )
 
         for record in domain_result.records:
-            if record.classification == FindingClassification.QUERY_ERROR:
+            if record.classification in {
+                FindingClassification.QUERY_ERROR,
+                FindingClassification.SCAN_ERROR,
+            }:
                 if record.fqdn == domain_result.domain:
                     errors.append(record.value)
                 continue
@@ -680,10 +902,12 @@ def build_json_document(result: ScanRunResult) -> dict:
             {
                 "base_domain": domain_result.domain,
                 "wildcard_suspected": domain_result.wildcard_suspected,
+                "scan_failed": domain_result.scan_failed,
                 "authoritative_nameservers": _authoritative_nameservers(domain_result),
                 "axfr_status": _domain_axfr_status(domain_result, axfr_enabled),
+                "scan_status": _determine_scan_status(domain_result, counts),
                 "findings": findings,
-                "summary_counts": _domain_summary_counts(domain_result),
+                "summary_counts": counts,
                 "errors": errors,
                 "notes": domain_result.notes + [DISCOVERY_LIMITATION],
             }

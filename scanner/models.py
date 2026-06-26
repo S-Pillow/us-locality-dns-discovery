@@ -90,12 +90,15 @@ class FindingClassification(str, Enum):
     """How a discovery finding should be interpreted in reports."""
 
     BASE_DOMAIN_RECORD = "base_domain_record"
+    BASE_ZONE_EXISTS = "base_zone_exists"
+    ZONE_SOA_DISCOVERED = "zone_soa_discovered"
     AUTHORITATIVE_NS = "authoritative_ns"
-    POSSIBLE_SUBDELEGATION = "possible_subdelegation"
+    DELEGATED_CHILD_ZONE = "delegated_child_zone"
     STANDARD_RECORD = "standard_record"
     AXFR_SUCCESS = "axfr_success"
     AXFR_BLOCKED = "axfr_blocked"
     QUERY_ERROR = "query_error"
+    SCAN_ERROR = "scan_error"
     NO_RECORDS_DISCOVERED = "no_records_discovered"
 
 
@@ -161,6 +164,7 @@ class DomainScanResult:
     notes: list[str] = field(default_factory=list)
     wildcard_suspected: bool = False
     candidates_tested: int = 0
+    scan_failed: bool = False
 
 
 @dataclass

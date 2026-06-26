@@ -146,7 +146,8 @@ For each input domain the tool:
 - Optionally attempts AXFR (refused/timeout/failure is treated as a normal outcome)
 - Generates 4th-level candidates from selected wordlist labels (e.g. `ci.example.ky.us`)
 - Generates limited 5th-level candidates for `ci`/`co` branches when RFC/locality baseline is selected (e.g. `www.ci.example.ky.us`)
-- Tests candidates for NS (possible subdelegation) plus SOA, A, AAAA, MX, TXT, CNAME
+- Tests candidates for NS (delegated child zone) plus SOA, A, AAAA, MX, TXT, CNAME
+- Captures SOA records from the DNS AUTHORITY section when the queried record type has no ANSWER (zone exists even without an apex A record)
 - Probes for wildcard DNS using unlikely random names
 
 Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging the GUI.
@@ -180,7 +181,24 @@ Reports are written to the [output folder for your mode](#where-reports-are-save
 | **Scan Settings** | Scan metadata, wordlist sources, DNS timeouts, completion/cancellation flags, and the discovery limitation note. |
 | **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
 
-Summary `scan_status` values use discovery-based wording such as *Possible subdelegation discovered*, *DNS activity discovered*, *Base domain records only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
+Summary `scan_status` values use discovery-based wording such as *Possible delegated child zone discovered*, *DNS activity discovered*, *DNS activity discovered with scan errors*, *Base domain zone exists*, *Base domain records only*, *Scan incomplete / error*, *Scan errors only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
+
+**Summary columns to compare:**
+
+| Column | Meaning |
+|--------|---------|
+| `base_zone_exists` | `true` when an SOA proves the base zone exists, even if no apex A record was found |
+| `delegated_child_zones_found` | Count of candidate child names with NS records (delegated child zones) |
+| `dns_names_with_records_found` | Count of base/candidate names with DNS records such as A/AAAA/CNAME/MX/TXT/SOA |
+| `standard_records_found` | Count of non-NS record findings on tested candidate names |
+
+**DNS activity vs. delegated child zones:** DNS activity means records such as A, AAAA, CNAME, MX, TXT, or SOA were found on the base domain or a candidate name. A delegated child zone requires an NS record on a candidate child name (for example `ci.example.pa.us`). Finding `www.example.pa.us` with an A record is DNS activity, not a delegated child zone.
+
+**SOA / zone evidence:** A domain can have an authoritative SOA and exist as a zone even when the requested record type (such as A) has no ANSWER. SOA evidence means the zone exists under tested methods; it is not the same as finding a delegated child zone.
+
+**Scan errors:** If a domain hits an unexpected scan error (for example `EOF`), its status is reported as *Scan incomplete / error* or *Scan errors only*, not as a clean no-result. Rerun affected domains before drawing conclusions.
+
+**Actual 3rd-level domains:** When evaluating externally managed `.us` locality activity, prefer scanning your real 3rd-level domain list in small batches rather than placeholder domains. Some externally delegated zones may not be visible to public recursive resolvers until their authoritative nameservers are queried.
 
 **Summary vs. Findings:** Summary is the per-domain rollup for batch review; Findings is the line-item evidence behind those rollups.
 
@@ -227,6 +245,8 @@ During a scan:
 **Discovery** means records found through tested methods only.
 
 - **No records discovered using tested methods** does **not** prove that no records or subdelegations exist. A domain may have labels the wordlists never tested, records only visible from other vantage points, or activity outside this tool’s query scope.
+- **SOA evidence** means the zone exists under tested methods, even when no apex A/AAAA answer is present.
+- **DNS activity discovered** (A/AAAA/CNAME/MX/TXT/SOA on a name) is not the same as **delegated child zone discovered** (NS on a candidate child name).
 - This tool must not claim complete zone enumeration.
 - Reports use discovery-based language, not assertions of absence.
 
