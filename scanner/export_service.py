@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -22,6 +22,7 @@ from scanner.models import (
     DomainInputRecord,
     DomainScanResult,
     FindingClassification,
+    RecordType,
     ScanRunResult,
     ScanStatus,
 )
@@ -168,6 +169,7 @@ EVIDENCE_REVIEW_COLUMNS = [
     "new_technical_hostnames_found",
     "new_organizational_domains_found",
     "known_domains_validated",
+    "why",
     "analysis_note",
     "manual_verification_hint",
     "limitation_note",
@@ -201,6 +203,7 @@ CSV_COLUMNS = [
     "known_domain",
     "name_type",
     "evidence_value",
+    "why",
     "tested_name",
     "record_type",
     "finding_type",
@@ -238,6 +241,7 @@ SUMMARY_COLUMNS = [
     "new_organizational_domains_found",
     "new_organizational_domains_count",
     "evidence_value",
+    "why",
     "recommended_review_action",
     "manual_verification_hint",
     "scan_status",
@@ -369,6 +373,207 @@ def _join_domain_list(names: set[str]) -> str:
     return "; ".join(sorted(names))
 
 
+DISPLAY_KNOWN_DOMAIN = {
+    "yes": "Yes",
+    "no": "No",
+}
+
+DISPLAY_EVIDENCE_VALUE = {
+    "strong": "Strong",
+    "moderate": "Moderate",
+    "limited": "Limited",
+    "validation_only": "Validation only",
+    "context_only": "Context only",
+    "none": "None",
+    "inconclusive": "Inconclusive",
+}
+
+DISPLAY_NAME_TYPE = {
+    "base_domain": "Base domain",
+    "delegated_child_zone": "Delegated child zone",
+    "organizational_child_name": "Organizational child name",
+    "service_hostname": "Service hostname",
+    "generic_hostname": "Generic hostname",
+    "technical_vendor_hostname": "Technical/vendor hostname",
+    "alias_to_known_domain": "Alias to known domain",
+    "alias_to_external_target": "Alias to external target",
+    "unknown_child_hostname": "Unknown child hostname",
+}
+
+
+@dataclass
+class DnsEvidenceContext:
+    """DNS evidence indexed by owner name for CNAME-aware classification."""
+
+    cname_targets: dict[str, str] = field(default_factory=dict)
+    direct_delegation: set[str] = field(default_factory=set)
+
+
+def _display_known_domain(value: str) -> str:
+    return DISPLAY_KNOWN_DOMAIN.get(value.lower(), value)
+
+
+def _display_evidence_value(value: str) -> str:
+    return DISPLAY_EVIDENCE_VALUE.get(value.lower(), value)
+
+
+def _display_name_type(value: str) -> str:
+    return DISPLAY_NAME_TYPE.get(value, value.replace("_", " ").title())
+
+
+def _coworker_display_row(row: dict[str, str]) -> dict[str, str]:
+    """Return a copy with human-readable classification fields for XLSX."""
+    display = dict(row)
+    if "known_domain" in display:
+        display["known_domain"] = _display_known_domain(display["known_domain"])
+    if "evidence_value" in display:
+        display["evidence_value"] = _display_evidence_value(display["evidence_value"])
+    if "name_type" in display and display["name_type"]:
+        display["name_type"] = _display_name_type(display["name_type"])
+    return display
+
+
+def _build_dns_evidence_context(domain_result: DomainScanResult) -> DnsEvidenceContext:
+    """Build CNAME and direct-delegation maps from raw DNS findings."""
+    base = domain_result.domain
+    cname_targets: dict[str, str] = {}
+    direct_delegation: set[str] = set()
+
+    for record in domain_result.records:
+        fqdn = normalize_domain_name(record.fqdn)
+
+        if record.record_type == RecordType.CNAME:
+            target = normalize_domain_name(record.value.rstrip("."))
+            cname_targets[fqdn] = target
+
+        if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+            if record.record_type == RecordType.NS and _is_child_name(fqdn, base):
+                direct_delegation.add(fqdn)
+            continue
+
+        if record.classification == FindingClassification.ZONE_SOA_DISCOVERED:
+            if _is_child_name(fqdn, base):
+                direct_delegation.add(fqdn)
+            continue
+
+        if record.classification == FindingClassification.AXFR_SUCCESS:
+            if _is_child_name(fqdn, base):
+                direct_delegation.add(fqdn)
+
+    return DnsEvidenceContext(cname_targets=cname_targets, direct_delegation=direct_delegation)
+
+
+def _has_direct_delegation(fqdn: str, ctx: DnsEvidenceContext) -> bool:
+    return normalize_domain_name(fqdn) in ctx.direct_delegation
+
+
+def _cname_target_for(fqdn: str, ctx: DnsEvidenceContext) -> str | None:
+    return ctx.cname_targets.get(normalize_domain_name(fqdn))
+
+
+def _why_for_child_name(
+    *,
+    fqdn: str,
+    base_domain: str,
+    known_domain: bool,
+    name_type: str,
+    evidence_value: str,
+    ctx: DnsEvidenceContext,
+    record: DiscoveredRecord | None = None,
+) -> str:
+    if name_type == "base_domain":
+        if evidence_value == "context_only":
+            return "Only base-domain DNS evidence was found; no child domains were discovered by tested methods."
+        return "Base domain DNS records discovered during the scan."
+
+    if name_type == "alias_to_known_domain":
+        return (
+            "New DNS alias/hostname found, but it points to a child domain already known in the system."
+        )
+
+    if name_type == "alias_to_external_target":
+        return "Not a child name under the scanned base domain."
+
+    if known_domain and name_type == "delegated_child_zone":
+        return "Already listed in the system and confirmed in DNS."
+
+    if known_domain:
+        return "Already listed in the system and confirmed in DNS."
+
+    if name_type == "delegated_child_zone":
+        if record and record.record_type == RecordType.SOA:
+            return "Confirms a delegated child zone with SOA records."
+        if record and record.record_type == RecordType.NS:
+            return "New delegated child zone found because the name has NS or SOA records."
+        return "New delegated child zone found because the name has NS or SOA records."
+
+    if name_type == "generic_hostname":
+        return "Found in live DNS but appears to be a generic hostname such as www or mail."
+
+    if name_type == "technical_vendor_hostname":
+        return (
+            "Found in live DNS but appears to be a technical/vendor hostname such as "
+            "autodiscover or msoid."
+        )
+
+    if name_type in {"organizational_child_name", "service_hostname"}:
+        return "Found in live DNS and not listed in the system input."
+
+    if evidence_value == "limited":
+        target = _cname_target_for(fqdn, ctx)
+        if target and _is_child_name(target, base_domain):
+            return (
+                "New DNS alias/hostname found, but it points to a child domain already known "
+                "in the system."
+            )
+        return "Found in live DNS and not listed in the system input."
+
+    return "Found in live DNS and not listed in the system input."
+
+
+def _why_for_domain_summary(
+    evidence_value: str,
+    comparison: dict[str, str | int | bool],
+    *,
+    scan_failed: bool,
+) -> str:
+    if scan_failed or evidence_value == "inconclusive":
+        return "Scan incomplete or errored; rerun before drawing conclusions."
+
+    new_count = int(comparison.get("new_child_domains_count", 0))
+    new_delegated_count = int(comparison.get("new_delegated_domains_count", 0))
+    validated_count = int(comparison.get("known_domains_validated_count", 0))
+
+    if evidence_value == "strong" or new_delegated_count > 0:
+        return "New child domains were found in live DNS that were not listed in the system input."
+
+    if evidence_value == "moderate" and new_count > 0:
+        return "New child domains were found in live DNS that were not listed in the system input."
+
+    if evidence_value == "limited" and new_count > 0:
+        if new_delegated_count == 0 and validated_count > 0:
+            return (
+                "New DNS names were found, but evidence is limited "
+                "(for example aliases to known domains)."
+            )
+        if int(comparison.get("new_generic_hostnames_count", 0)) > 0 or int(
+            comparison.get("new_technical_hostnames_count", 0)
+        ) > 0:
+            return "Only generic or technical hostnames were found; useful context but limited evidence."
+        return "New DNS names were found, but evidence is limited."
+
+    if evidence_value == "validation_only" or (validated_count > 0 and new_count == 0):
+        return "Only known child domains were validated; no new child domains were discovered."
+
+    if evidence_value == "context_only":
+        return "Only base-domain DNS evidence was found; no child domains were discovered by tested methods."
+
+    if evidence_value == "none":
+        return "No child DNS names were discovered using tested methods."
+
+    return "No new child domains found using tested methods."
+
+
 def _collect_dns_discovered_children(
     domain_result: DomainScanResult,
 ) -> tuple[set[str], set[str], bool]:
@@ -447,9 +652,21 @@ def _classify_name_type(
     base_domain: str,
     *,
     is_delegated: bool,
+    ctx: DnsEvidenceContext | None = None,
+    known: set[str] | None = None,
 ) -> str:
-    if normalize_domain_name(fqdn) == normalize_domain_name(base_domain):
+    normalized = normalize_domain_name(fqdn)
+    if normalized == normalize_domain_name(base_domain):
         return "base_domain"
+
+    if ctx is not None:
+        target = _cname_target_for(fqdn, ctx)
+        if target is not None:
+            if not _is_child_name(target, base_domain):
+                return "alias_to_external_target"
+            if known and target in known:
+                return "alias_to_known_domain"
+
     if is_delegated:
         return "delegated_child_zone"
     label = _extract_leftmost_label(fqdn, base_domain)
@@ -473,6 +690,8 @@ def _evidence_value_for_child_name(
 ) -> str:
     if known_domain:
         return "validation_only"
+    if name_type in {"alias_to_known_domain", "alias_to_external_target"}:
+        return "limited"
     if is_delegated or name_type == "delegated_child_zone" or has_axfr_child:
         return "strong"
     if name_type in {"organizational_child_name", "service_hostname"}:
@@ -492,7 +711,11 @@ def _aggregate_domain_evidence_value(
 ) -> str:
     if scan_failed:
         return "inconclusive"
-    new_values = [value for value in child_evidence_values if value in {"strong", "moderate", "limited"}]
+    new_values = [
+        value
+        for value in child_evidence_values
+        if value in {"strong", "moderate", "limited"}
+    ]
     if "strong" in new_values:
         return "strong"
     if "moderate" in new_values:
@@ -508,38 +731,64 @@ def _aggregate_domain_evidence_value(
     return "none"
 
 
+def _classify_child_name_metadata(
+    name: str,
+    domain_result: DomainScanResult,
+    known: set[str],
+    ctx: DnsEvidenceContext,
+    axfr_new: set[str],
+) -> dict[str, str]:
+    is_delegated = _has_direct_delegation(name, ctx)
+    known_domain = name in known
+    name_type = _classify_name_type(
+        name,
+        domain_result.domain,
+        is_delegated=is_delegated,
+        ctx=ctx,
+        known=known,
+    )
+    evidence_value = _evidence_value_for_child_name(
+        known_domain=known_domain,
+        name_type=name_type,
+        is_delegated=is_delegated,
+        has_axfr_child=name in axfr_new,
+    )
+    why = _why_for_child_name(
+        fqdn=name,
+        base_domain=domain_result.domain,
+        known_domain=known_domain,
+        name_type=name_type,
+        evidence_value=evidence_value,
+        ctx=ctx,
+    )
+    return {
+        "discovered_name": name,
+        "known_domain": "yes" if known_domain else "no",
+        "name_type": name_type,
+        "evidence_value": evidence_value,
+        "why": why,
+    }
+
+
 def _build_child_domain_inventory(
     domain_result: DomainScanResult,
 ) -> dict[str, str | int | bool | set[str]]:
     known = known_child_domains_from_record(domain_result.input_record)
+    ctx = _build_dns_evidence_context(domain_result)
     discovered, delegated_discovered, dns_discovered_base_only = _collect_dns_discovered_children(
         domain_result
     )
     axfr_new = _axfr_child_names_not_in_input(domain_result, known)
 
-    delegated_set: set[str] = set()
-    for record in domain_result.records:
-        if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
-            if _is_child_name(record.fqdn, domain_result.domain):
-                delegated_set.add(normalize_domain_name(record.fqdn))
-
     per_name: dict[str, dict[str, str]] = {}
     for name in sorted(discovered | axfr_new):
-        is_delegated = name in delegated_set
-        known_domain = name in known
-        name_type = _classify_name_type(name, domain_result.domain, is_delegated=is_delegated)
-        evidence_value = _evidence_value_for_child_name(
-            known_domain=known_domain,
-            name_type=name_type,
-            is_delegated=is_delegated,
-            has_axfr_child=name in axfr_new,
+        per_name[name] = _classify_child_name_metadata(
+            name,
+            domain_result,
+            known,
+            ctx,
+            axfr_new,
         )
-        per_name[name] = {
-            "discovered_name": name,
-            "known_domain": "yes" if known_domain else "no",
-            "name_type": name_type,
-            "evidence_value": evidence_value,
-        }
 
     validated = discovered & known
     new_children = {name for name, meta in per_name.items() if meta["known_domain"] == "no"}
@@ -551,7 +800,8 @@ def _build_child_domain_inventory(
     new_generic = {
         name
         for name, meta in per_name.items()
-        if meta["known_domain"] == "no" and meta["name_type"] == "generic_hostname"
+        if meta["known_domain"] == "no"
+        and meta["name_type"] in {"generic_hostname", "alias_to_known_domain"}
     }
     new_technical = {
         name
@@ -566,8 +816,13 @@ def _build_child_domain_inventory(
     }
 
     counts = _domain_summary_counts(domain_result)
+    unknown_evidence = [
+        meta["evidence_value"]
+        for meta in per_name.values()
+        if meta["known_domain"] == "no"
+    ]
     evidence_value = _aggregate_domain_evidence_value(
-        [meta["evidence_value"] for meta in per_name.values()],
+        unknown_evidence,
         scan_failed=_domain_has_scan_error(domain_result),
         has_base_zone=bool(counts["base_zone_exists_flag"]),
         any_child_discovered=bool(discovered),
@@ -595,6 +850,7 @@ def _build_child_domain_inventory(
         "_new_delegated_set": new_delegated,
         "_dns_discovered_base_only": dns_discovered_base_only,
         "_known_set": known,
+        "_dns_ctx": ctx,
     }
 
 
@@ -608,6 +864,7 @@ def _compare_known_vs_discovered(
     export["_known_set"] = inventory["_known_set"]
     export["_dns_discovered_base_only"] = inventory["_dns_discovered_base_only"]
     export["_per_name"] = inventory["_per_name"]
+    export["_dns_ctx"] = inventory["_dns_ctx"]
     return export
 
 
@@ -741,32 +998,84 @@ def _finding_child_metadata(
     fqdn: str,
     comparison: dict[str, str | int | bool],
     *,
-    is_delegated: bool,
+    record: DiscoveredRecord | None = None,
 ) -> dict[str, str]:
     per_name = comparison.get("_per_name", {})
-    if isinstance(per_name, dict) and fqdn in per_name:
-        meta = per_name[fqdn]
-        return {
+    ctx = comparison.get("_dns_ctx")
+    if not isinstance(ctx, DnsEvidenceContext):
+        ctx = _build_dns_evidence_context(domain_result)
+
+    normalized = normalize_domain_name(fqdn)
+    if isinstance(per_name, dict) and normalized in per_name:
+        meta = dict(per_name[normalized])
+    elif isinstance(per_name, dict) and fqdn in per_name:
+        meta = dict(per_name[fqdn])
+    else:
+        known = comparison.get("_known_set", set())
+        known_domain = "yes" if normalized in known else "no"
+        is_delegated = _has_direct_delegation(fqdn, ctx)
+        known_set = known if isinstance(known, set) else set()
+        name_type = _classify_name_type(
+            fqdn,
+            domain_result.domain,
+            is_delegated=is_delegated,
+            ctx=ctx,
+            known=known_set,
+        )
+        evidence_value = _evidence_value_for_child_name(
+            known_domain=known_domain == "yes",
+            name_type=name_type,
+            is_delegated=is_delegated,
+            has_axfr_child=False,
+        )
+        meta = {
             "discovered_name": fqdn,
-            "known_domain": meta["known_domain"],
-            "name_type": meta["name_type"],
-            "evidence_value": meta["evidence_value"],
+            "known_domain": known_domain,
+            "name_type": name_type,
+            "evidence_value": evidence_value,
         }
-    known = comparison.get("_known_set", set())
-    known_domain = "yes" if fqdn in known else "no"
-    name_type = _classify_name_type(fqdn, domain_result.domain, is_delegated=is_delegated)
-    evidence_value = _evidence_value_for_child_name(
-        known_domain=known_domain == "yes",
-        name_type=name_type,
-        is_delegated=is_delegated,
-        has_axfr_child=False,
+
+    if record is not None and record.record_type == RecordType.CNAME:
+        target = normalize_domain_name(record.value.rstrip("."))
+        known_set = comparison.get("_known_set", set())
+        if not isinstance(known_set, set):
+            known_set = set()
+        if not _is_child_name(target, domain_result.domain):
+            meta["name_type"] = "alias_to_external_target"
+            meta["evidence_value"] = "limited"
+            meta["known_domain"] = "no"
+        elif target in known_set:
+            meta["name_type"] = "alias_to_known_domain"
+            meta["evidence_value"] = "limited"
+            if normalized not in known_set:
+                meta["known_domain"] = "no"
+
+    if record is not None and record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+        if not _has_direct_delegation(fqdn, ctx):
+            meta["name_type"] = _classify_name_type(
+                fqdn,
+                domain_result.domain,
+                is_delegated=False,
+                ctx=ctx,
+                known=comparison.get("_known_set") if isinstance(comparison.get("_known_set"), set) else None,
+            )
+            meta["evidence_value"] = _evidence_value_for_child_name(
+                known_domain=meta["known_domain"] == "yes",
+                name_type=meta["name_type"],
+                is_delegated=False,
+                has_axfr_child=False,
+            )
+
+    meta["why"] = _why_for_child_name(
+        fqdn=fqdn,
+        base_domain=domain_result.domain,
+        known_domain=meta["known_domain"] == "yes",
+        name_type=meta["name_type"],
+        evidence_value=meta["evidence_value"],
+        ctx=ctx,
+        record=record,
     )
-    return {
-        "discovered_name": fqdn,
-        "known_domain": known_domain,
-        "name_type": name_type,
-        "evidence_value": evidence_value,
-    }
+    return meta
 
 
 def _wordlist_sources_text(result: ScanRunResult) -> str:
@@ -1159,6 +1468,11 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
         comparison = _compare_known_vs_discovered(domain_result)
 
         if _should_emit_no_records_row(domain_result, counts):
+            domain_why = _why_for_domain_summary(
+                str(comparison.get("evidence_value", "none")),
+                comparison,
+                scan_failed=_domain_has_scan_error(domain_result),
+            )
             rows.append(
                 {
                     "scan_timestamp": scan_timestamp,
@@ -1167,6 +1481,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "known_domain": "yes",
                     "name_type": "base_domain",
                     "evidence_value": str(comparison.get("evidence_value", "none")),
+                    "why": domain_why,
                     "tested_name": domain_result.domain,
                     "record_type": "",
                     "finding_type": FindingClassification.NO_RECORDS_DISCOVERED.value,
@@ -1186,12 +1501,11 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
         for record in domain_result.records:
             if not _include_record_in_export(record, domain_result.domain):
                 continue
-            is_delegated = record.classification == FindingClassification.DELEGATED_CHILD_ZONE
             child_meta = _finding_child_metadata(
                 domain_result,
                 record.fqdn,
                 comparison,
-                is_delegated=is_delegated,
+                record=record,
             )
 
             rows.append(
@@ -1236,6 +1550,7 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
             if not str(key).startswith("_")
         }
         evidence_value = str(comparison.get("evidence_value", "none"))
+        scan_failed = _domain_has_scan_error(domain_result)
         rows.append(
             {
                 "scan_timestamp": scan_timestamp,
@@ -1243,6 +1558,11 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 **metadata,
                 **comparison_export,
                 "evidence_value": evidence_value,
+                "why": _why_for_domain_summary(
+                    evidence_value,
+                    comparison,
+                    scan_failed=scan_failed,
+                ),
                 "recommended_review_action": _recommended_review_action(evidence_value),
                 "manual_verification_hint": _manual_verification_hint(
                     domain_result,
@@ -1704,7 +2024,7 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     review_sheet = workbook.active
     review_sheet.title = "Evidence Review"
 
-    review_rows = build_evidence_review_rows(result)
+    review_rows = [_coworker_display_row(row) for row in build_evidence_review_rows(result)]
     _write_table_sheet(
         review_sheet,
         EVIDENCE_REVIEW_COLUMNS,
@@ -1716,6 +2036,7 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
             "new_technical_hostnames_found",
             "new_organizational_domains_found",
             "known_domains_validated",
+            "why",
             "analysis_note",
             "manual_verification_hint",
             "limitation_note",
@@ -1723,12 +2044,13 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     )
 
     summary_sheet = workbook.create_sheet("Summary")
-    summary_rows = build_summary_rows(result)
+    summary_rows = [_coworker_display_row(row) for row in build_summary_rows(result)]
     _write_table_sheet(
         summary_sheet,
         SUMMARY_COLUMNS,
         summary_rows,
         wrap_columns={
+            "why",
             "analysis_note",
             "limitation_note",
             "manual_verification_hint",
@@ -1747,12 +2069,12 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     )
 
     findings_sheet = workbook.create_sheet("Findings")
-    findings_rows = build_findings_rows(result)
+    findings_rows = [_coworker_display_row(row) for row in build_findings_rows(result)]
     _write_table_sheet(
         findings_sheet,
         CSV_COLUMNS,
         findings_rows,
-        wrap_columns={"value", "notes", "error", "nameserver"},
+        wrap_columns={"value", "why", "notes", "error", "nameserver"},
     )
 
     settings_sheet = workbook.create_sheet("Scan Settings")

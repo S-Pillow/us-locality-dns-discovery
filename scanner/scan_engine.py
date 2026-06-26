@@ -632,11 +632,13 @@ def _parse_dns_response(
     authoritative_response = bool(response.flags & dns.flags.AA)
     saw_soa_answer = False
 
+    queried = _display_name(fqdn)
     for rrset in response.answer:
         try:
             parsed_type = RecordType(dns.rdatatype.to_text(rrset.rdtype))
         except ValueError:
             continue
+        owner = _display_name(rrset.name.to_text())
         if parsed_type == RecordType.SOA:
             saw_soa_answer = True
         ttl = rrset.ttl
@@ -644,7 +646,7 @@ def _parse_dns_response(
             if parsed_type == RecordType.SOA:
                 _append_soa_finding(
                     findings,
-                    fqdn=_display_name(rrset.name.to_text()),
+                    fqdn=owner,
                     base_domain=base_domain,
                     rdata=rdata,
                     ttl=ttl,
@@ -654,13 +656,22 @@ def _parse_dns_response(
                     authoritative_response=authoritative_response,
                 )
                 continue
+            if record_type == RecordType.NS:
+                if parsed_type == RecordType.NS:
+                    if owner != queried:
+                        continue
+                    item_classification = FindingClassification.DELEGATED_CHILD_ZONE
+                else:
+                    item_classification = FindingClassification.STANDARD_RECORD
+            else:
+                item_classification = classification
             findings.append(
                 DiscoveredRecord(
-                    fqdn=_display_name(rrset.name.to_text()),
+                    fqdn=owner,
                     record_type=parsed_type,
                     value=_format_rdata(parsed_type, rdata),
                     source_method=source_method,
-                    classification=classification,
+                    classification=item_classification,
                     confidence="high" if authoritative_response else confidence,
                     nameserver=nameserver,
                     ttl=ttl,
