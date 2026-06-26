@@ -334,9 +334,14 @@ class DiscoveryApp(tk.Tk):
             choice["value"] = value
             dialog.destroy()
 
-        ttk.Button(frame, text="CSV", command=lambda: select("csv")).pack(fill=tk.X, pady=2)
+        ttk.Button(
+            frame,
+            text="XLSX workbook (recommended)",
+            command=lambda: select("xlsx"),
+        ).pack(fill=tk.X, pady=2)
+        ttk.Button(frame, text="Findings CSV", command=lambda: select("csv")).pack(fill=tk.X, pady=2)
         ttk.Button(frame, text="JSON", command=lambda: select("json")).pack(fill=tk.X, pady=2)
-        ttk.Button(frame, text="Both", command=lambda: select("both")).pack(fill=tk.X, pady=2)
+        ttk.Button(frame, text="All formats", command=lambda: select("all")).pack(fill=tk.X, pady=2)
         ttk.Button(frame, text="Cancel", command=dialog.destroy).pack(fill=tk.X, pady=(8, 0))
 
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
@@ -367,8 +372,12 @@ class DiscoveryApp(tk.Tk):
             return
 
         self._log("Export complete:")
+        if outcome.xlsx_path:
+            self._log(f"  XLSX: {outcome.xlsx_path}")
         if outcome.csv_path:
             self._log(f"  CSV: {outcome.csv_path}")
+        if outcome.summary_csv_path:
+            self._log(f"  Summary CSV: {outcome.summary_csv_path}")
         if outcome.json_path:
             self._log(f"  JSON: {outcome.json_path}")
         self._log(f"  Rows exported: {outcome.row_count}")

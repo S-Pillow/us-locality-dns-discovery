@@ -17,7 +17,7 @@ What works today:
 - Candidate-count warnings when estimates exceed 250 or 500 names per domain
 - Real DNS discovery for base domains and generated candidate subdomains
 - Wildcard suspicion detection with lower-confidence marking for affected A/AAAA/CNAME results
-- **Export Results** to timestamped CSV and JSON reports in `output/` after a completed scan
+- **Export Results** to timestamped **XLSX workbook** (recommended), findings CSV, summary CSV, and JSON in `output/` after a completed scan
 
 ## Wordlist sources
 
@@ -72,14 +72,32 @@ Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging 
 
 ## Exporting results
 
-After a scan completes, **Export Results** becomes enabled. Choose **CSV**, **JSON**, or **Both**. Reports are written to `output/` with timestamped filenames such as:
+After a scan completes, **Export Results** becomes enabled. Choose:
 
+- **XLSX workbook (recommended)** — operator-facing Excel review package
+- **Findings CSV** — technical findings export (15-column contract)
+- **JSON** — advanced/debugging export
+- **All formats** — XLSX, findings CSV, summary CSV, and JSON
+
+Reports are written to `output/` with timestamped filenames such as:
+
+- `us_locality_dns_report_YYYYMMDD_HHMMSS.xlsx`
 - `us_locality_dns_discovery_YYYYMMDD_HHMMSS.csv`
+- `us_locality_dns_discovery_YYYYMMDD_HHMMSS_summary.csv`
 - `us_locality_dns_discovery_YYYYMMDD_HHMMSS.json`
 
-CSV columns document each finding with scan metadata, wordlist sources, wildcard status, and AXFR status. JSON includes `scan_metadata`, per-domain `findings`, `summary_counts`, and `errors`.
+### XLSX workbook sheets
 
-Every report includes this discovery limitation:
+| Sheet | Purpose |
+|-------|---------|
+| **Summary** | One row per base domain with scan status, evidence summary, and counts |
+| **Findings** | Detailed finding rows (same columns as findings CSV) |
+| **Scan Settings** | Scan metadata, wordlist sources, timeouts, and limitation note |
+| **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, and query errors |
+
+Summary `scan_status` values use discovery-based wording such as *Possible subdelegation discovered*, *DNS activity discovered*, *Base domain records only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
+
+Every report includes:
 
 > DNS discovery results show only records found through the tested methods. No records discovered does not prove that no subdelegations or DNS records exist.
 
