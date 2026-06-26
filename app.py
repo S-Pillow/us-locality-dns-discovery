@@ -34,6 +34,16 @@ APP_TITLE = ".US Locality DNS Discovery Tool"
 DEFAULT_OUTPUT_DIR = get_default_output_dir()
 WORDLISTS_DIR = get_wordlists_dir()
 
+DEFAULT_WINDOW_WIDTH = 960
+DEFAULT_WINDOW_HEIGHT = 820
+MIN_WINDOW_WIDTH = 880
+MIN_WINDOW_HEIGHT = 620
+SETUP_CANVAS_HEIGHT = 290
+PREFLIGHT_TEXT_HEIGHT = 5
+LOG_TEXT_MIN_HEIGHT = 9
+UI_FRAME_PAD = 6
+UI_SECTION_PADY = 4
+
 
 class DiscoveryApp(tk.Tk):
     """Main Tkinter window for the discovery tool."""
@@ -41,8 +51,8 @@ class DiscoveryApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(APP_TITLE)
-        self.minsize(900, 600)
-        self.geometry("960x720")
+        self.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+        self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
 
         self.domain_file_var = tk.StringVar()
         self.wordlist_file_var = tk.StringVar()
@@ -68,6 +78,7 @@ class DiscoveryApp(tk.Tk):
         self._cancel_requested: bool = False
         self._heartbeat_after_id: str | None = None
         self._progress_indeterminate: bool = False
+        self._preflight_collapsed: bool = False
 
         self.wordlist_file_var.trace_add("write", self._on_wordlist_path_changed)
 
@@ -84,32 +95,55 @@ class DiscoveryApp(tk.Tk):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(0, weight=0)
+        self.rowconfigure(1, weight=0)
+        self.rowconfigure(2, weight=1)
+        self.rowconfigure(3, weight=0)
 
-        canvas = tk.Canvas(self, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        setup_outer = ttk.Frame(self)
+        setup_outer.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, UI_SECTION_PADY))
+        setup_outer.columnconfigure(0, weight=1)
 
-        main = ttk.Frame(canvas, padding=12)
-        canvas_window = canvas.create_window((0, 0), window=main, anchor="nw")
+        self.setup_canvas = tk.Canvas(
+            setup_outer,
+            height=SETUP_CANVAS_HEIGHT,
+            highlightthickness=0,
+        )
+        setup_scrollbar = ttk.Scrollbar(
+            setup_outer,
+            orient=tk.VERTICAL,
+            command=self.setup_canvas.yview,
+        )
+        self.setup_canvas.grid(row=0, column=0, sticky="ew")
+        setup_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.setup_canvas.configure(yscrollcommand=setup_scrollbar.set)
 
-        def _on_frame_configure(_event=None) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
+        main = ttk.Frame(self.setup_canvas, padding=UI_FRAME_PAD)
+        self._setup_canvas_window = self.setup_canvas.create_window(
+            (0, 0),
+            window=main,
+            anchor="nw",
+        )
 
-        def _on_canvas_configure(event) -> None:
-            canvas.itemconfigure(canvas_window, width=event.width)
+        def _on_setup_configure(_event=None) -> None:
+            self.setup_canvas.configure(scrollregion=self.setup_canvas.bbox("all"))
 
-        main.bind("<Configure>", _on_frame_configure)
-        canvas.bind("<Configure>", _on_canvas_configure)
+        def _on_setup_canvas_configure(event) -> None:
+            self.setup_canvas.itemconfigure(self._setup_canvas_window, width=event.width)
 
-        def _on_mousewheel(event) -> None:
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        main.bind("<Configure>", _on_setup_configure)
+        self.setup_canvas.bind("<Configure>", _on_setup_canvas_configure)
 
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _on_setup_mousewheel(event) -> None:
+            self.setup_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        files_frame = ttk.LabelFrame(main, text="Input Files", padding=10)
-        files_frame.pack(fill=tk.X, pady=(0, 10))
+        self.setup_canvas.bind("<Enter>", lambda _event: self.setup_canvas.bind_all(
+            "<MouseWheel>", _on_setup_mousewheel
+        ))
+        self.setup_canvas.bind("<Leave>", lambda _event: self.setup_canvas.unbind_all("<MouseWheel>"))
+
+        files_frame = ttk.LabelFrame(main, text="Input Files", padding=UI_FRAME_PAD)
+        files_frame.pack(fill=tk.X, pady=(0, UI_SECTION_PADY))
 
         self._add_file_row(
             files_frame,
@@ -127,8 +161,8 @@ class DiscoveryApp(tk.Tk):
         )
         self._add_output_folder_row(files_frame, row=2)
 
-        wordlist_frame = ttk.LabelFrame(main, text="Wordlist Sources", padding=10)
-        wordlist_frame.pack(fill=tk.X, pady=(0, 10))
+        wordlist_frame = ttk.LabelFrame(main, text="Wordlist Sources", padding=UI_FRAME_PAD)
+        wordlist_frame.pack(fill=tk.X, pady=(0, UI_SECTION_PADY))
 
         wordlist_rows = [
             ("RFC/locality baseline", self.rfc_locality_var),
@@ -145,8 +179,8 @@ class DiscoveryApp(tk.Tk):
                 row=index // 2,
                 column=index % 2,
                 sticky=tk.W,
-                padx=(0, 24),
-                pady=2,
+                padx=(0, 16),
+                pady=1,
             )
             self.wordlist_checkbuttons.append(check)
 
@@ -155,10 +189,10 @@ class DiscoveryApp(tk.Tk):
             text="Include custom wordlist (when file selected)",
             variable=self.include_custom_var,
         )
-        self.custom_wordlist_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
+        self.custom_wordlist_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
 
-        options_frame = ttk.LabelFrame(main, text="Scan Profile", padding=10)
-        options_frame.pack(fill=tk.X, pady=(0, 10))
+        options_frame = ttk.LabelFrame(main, text="Scan Profile", padding=UI_FRAME_PAD)
+        options_frame.pack(fill=tk.X, pady=(0, UI_SECTION_PADY))
 
         profile_rows = [
             ("Light Evidence (10–25 domains)", ScanProfile.LIGHT.value),
@@ -172,39 +206,57 @@ class DiscoveryApp(tk.Tk):
                 variable=self.scan_profile_var,
                 value=value,
                 command=self._on_scan_profile_changed,
-            ).grid(row=0, column=index, sticky=tk.W, padx=(0, 18), pady=2)
+            ).grid(row=0, column=index, sticky=tk.W, padx=(0, 12), pady=1)
 
-        scan_options_frame = ttk.LabelFrame(main, text="Scan Options", padding=10)
-        scan_options_frame.pack(fill=tk.X, pady=(0, 10))
+        scan_options_frame = ttk.LabelFrame(main, text="Scan Options", padding=UI_FRAME_PAD)
+        scan_options_frame.pack(fill=tk.X, pady=(0, UI_SECTION_PADY))
 
         ttk.Checkbutton(scan_options_frame, text="Attempt AXFR", variable=self.axfr_var).grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 24), pady=2
+            row=0, column=0, sticky=tk.W, padx=(0, 16), pady=1
         )
         ttk.Checkbutton(
             scan_options_frame,
             text="Query authoritative nameservers directly",
             variable=self.auth_ns_var,
-        ).grid(row=0, column=1, sticky=tk.W, pady=2)
+        ).grid(row=0, column=1, sticky=tk.W, pady=1)
 
         self.wordlist_frame = wordlist_frame
 
-        preflight_frame = ttk.LabelFrame(main, text="Preflight Summary", padding=10)
-        preflight_frame.pack(fill=tk.X, pady=(0, 10))
-        self.preflight_var = tk.StringVar(
-            value=(
-                "Select a domain list to view preflight estimate.\n"
-                f"Recommended enriched CSV columns:\n  {RECOMMENDED_INPUT_COLUMNS_CSV}"
-            )
-        )
-        ttk.Label(
-            preflight_frame,
-            textvariable=self.preflight_var,
-            justify=tk.LEFT,
-            wraplength=860,
-        ).pack(anchor=tk.W)
+        preflight_frame = ttk.LabelFrame(main, text="Preflight Summary", padding=UI_FRAME_PAD)
+        preflight_frame.pack(fill=tk.X, pady=(0, UI_SECTION_PADY))
+        preflight_frame.columnconfigure(0, weight=1)
 
-        progress_frame = ttk.LabelFrame(main, text="Scan Progress", padding=10)
-        progress_frame.pack(fill=tk.X, pady=(0, 10))
+        preflight_toolbar = ttk.Frame(preflight_frame)
+        preflight_toolbar.grid(row=0, column=0, sticky="ew")
+        preflight_toolbar.columnconfigure(0, weight=1)
+        ttk.Label(
+            preflight_toolbar,
+            text="Scroll inside the box for full preflight details.",
+        ).grid(row=0, column=0, sticky=tk.W)
+        self.preflight_toggle_btn = ttk.Button(
+            preflight_toolbar,
+            text="Hide details",
+            command=self._toggle_preflight,
+            width=12,
+        )
+        self.preflight_toggle_btn.grid(row=0, column=1, sticky=tk.E, padx=(8, 0))
+
+        self.preflight_body = ttk.Frame(preflight_frame)
+        self.preflight_body.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.preflight_body.columnconfigure(0, weight=1)
+
+        self.preflight_text = scrolledtext.ScrolledText(
+            self.preflight_body,
+            wrap=tk.WORD,
+            height=PREFLIGHT_TEXT_HEIGHT,
+            state=tk.DISABLED,
+            font=("Segoe UI", 9),
+        )
+        self.preflight_text.grid(row=0, column=0, sticky="ew")
+
+        progress_frame = ttk.LabelFrame(self, text="Scan Progress", padding=UI_FRAME_PAD)
+        progress_frame.grid(row=1, column=0, sticky="ew", padx=8, pady=UI_SECTION_PADY)
+        progress_frame.columnconfigure(0, weight=1)
         self.progress_var = tk.DoubleVar(value=0.0)
         self.progress_bar = ttk.Progressbar(
             progress_frame,
@@ -212,17 +264,31 @@ class DiscoveryApp(tk.Tk):
             maximum=100,
             mode="determinate",
         )
-        self.progress_bar.pack(fill=tk.X, pady=(0, 6))
+        self.progress_bar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         self.progress_text_var = tk.StringVar(value="Scan not running.")
         ttk.Label(
             progress_frame,
             textvariable=self.progress_text_var,
             justify=tk.LEFT,
-            wraplength=860,
-        ).pack(anchor=tk.W)
+            wraplength=DEFAULT_WINDOW_WIDTH - 48,
+        ).grid(row=1, column=0, sticky="w")
 
-        actions_frame = ttk.Frame(self, padding=(12, 8))
-        actions_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+        log_frame = ttk.LabelFrame(self, text="Status / Log", padding=UI_FRAME_PAD)
+        log_frame.grid(row=2, column=0, sticky="nsew", padx=8, pady=UI_SECTION_PADY)
+        log_frame.rowconfigure(0, weight=1)
+        log_frame.columnconfigure(0, weight=1)
+
+        self.log_text = scrolledtext.ScrolledText(
+            log_frame,
+            wrap=tk.WORD,
+            height=LOG_TEXT_MIN_HEIGHT,
+            state=tk.DISABLED,
+            font=("Consolas", 10),
+        )
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+
+        actions_frame = ttk.Frame(self, padding=(8, 6))
+        actions_frame.grid(row=3, column=0, sticky="ew")
 
         self.run_button = ttk.Button(actions_frame, text="Run Scan", command=self._on_run_scan)
         self.run_button.pack(side=tk.LEFT, padx=(0, 8))
@@ -243,19 +309,31 @@ class DiscoveryApp(tk.Tk):
         )
         self.export_button.pack(side=tk.LEFT)
 
-        log_frame = ttk.LabelFrame(main, text="Status / Log", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
-
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
-            wrap=tk.WORD,
-            height=12,
-            state=tk.DISABLED,
-            font=("Consolas", 10),
+        self._set_preflight_text(
+            "Select a domain list to view preflight estimate.\n"
+            f"Recommended enriched CSV columns:\n  {RECOMMENDED_INPUT_COLUMNS_CSV}"
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-
         self._on_scan_profile_changed()
+
+    def _set_preflight_text(self, text: str) -> None:
+        self.preflight_text.configure(state=tk.NORMAL)
+        self.preflight_text.delete("1.0", tk.END)
+        self.preflight_text.insert("1.0", text)
+        self.preflight_text.configure(state=tk.DISABLED)
+        self.preflight_text.yview_moveto(0.0)
+
+    def _toggle_preflight(self, collapse: bool | None = None) -> None:
+        if collapse is None:
+            collapse = not self._preflight_collapsed
+        self._preflight_collapsed = collapse
+        if collapse:
+            self.preflight_body.grid_remove()
+            self.preflight_toggle_btn.configure(text="Show details")
+        else:
+            self.preflight_body.grid()
+            self.preflight_toggle_btn.configure(text="Hide details")
+        self.setup_canvas.update_idletasks()
+        self.setup_canvas.configure(scrollregion=self.setup_canvas.bbox("all"))
 
     def _add_file_row(
         self,
@@ -265,18 +343,18 @@ class DiscoveryApp(tk.Tk):
         variable: tk.StringVar,
         command,
     ) -> None:
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=2)
         entry = ttk.Entry(parent, textvariable=variable, width=70)
-        entry.grid(row=row, column=1, sticky=tk.EW, padx=(8, 8), pady=4)
-        ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, pady=4)
+        entry.grid(row=row, column=1, sticky=tk.EW, padx=(8, 8), pady=2)
+        ttk.Button(parent, text="Browse…", command=command).grid(row=row, column=2, pady=2)
         parent.columnconfigure(1, weight=1)
 
     def _add_output_folder_row(self, parent: ttk.Frame, row: int) -> None:
-        ttk.Label(parent, text="Output folder:").grid(row=row, column=0, sticky=tk.W, pady=4)
+        ttk.Label(parent, text="Output folder:").grid(row=row, column=0, sticky=tk.W, pady=2)
         entry = ttk.Entry(parent, textvariable=self.output_folder_var, width=70)
-        entry.grid(row=row, column=1, sticky=tk.EW, padx=(8, 8), pady=4)
+        entry.grid(row=row, column=1, sticky=tk.EW, padx=(8, 8), pady=2)
         button_frame = ttk.Frame(parent)
-        button_frame.grid(row=row, column=2, pady=4)
+        button_frame.grid(row=row, column=2, pady=2)
         ttk.Button(button_frame, text="Browse…", command=self._browse_output_folder).pack(side=tk.LEFT)
         ttk.Button(button_frame, text="Open Folder", command=self._open_output_folder).pack(
             side=tk.LEFT, padx=(6, 0)
@@ -433,7 +511,7 @@ class DiscoveryApp(tk.Tk):
 
         domain_path_str = self.domain_file_var.get().strip()
         if not domain_path_str:
-            self.preflight_var.set(
+            self._set_preflight_text(
                 "Select a domain list to view preflight estimate.\n" + output_line.rstrip()
             )
             return
@@ -441,15 +519,15 @@ class DiscoveryApp(tk.Tk):
         domain_path = Path(domain_path_str)
         ok, _message = validate_domain_file(domain_path)
         if not ok:
-            self.preflight_var.set("Preflight unavailable: invalid or missing domain list file.")
+            self._set_preflight_text("Preflight unavailable: invalid or missing domain list file.")
             return
 
         loaded = load_domain_inputs(domain_path)
         if loaded.error:
-            self.preflight_var.set(f"Preflight unavailable: {loaded.error}")
+            self._set_preflight_text(f"Preflight unavailable: {loaded.error}")
             return
         if not loaded.domains:
-            self.preflight_var.set("Preflight unavailable: no domains found in input file.")
+            self._set_preflight_text("Preflight unavailable: no domains found in input file.")
             return
 
         wordlist_path_str = self.wordlist_file_var.get().strip()
@@ -457,14 +535,14 @@ class DiscoveryApp(tk.Tk):
         if wordlist_path:
             ok, _message = validate_wordlist_file(wordlist_path)
             if not ok:
-                self.preflight_var.set("Preflight unavailable: invalid custom wordlist file.")
+                self._set_preflight_text("Preflight unavailable: invalid custom wordlist file.")
                 return
 
         summary = build_preflight_summary(
             self._build_scan_input(domain_path, wordlist_path, validate_output=False)
         )
         if summary is None:
-            self.preflight_var.set(
+            self._set_preflight_text(
                 "Preflight unavailable: could not read domain list or output folder.\n"
                 + output_line.rstrip()
             )
@@ -507,7 +585,7 @@ class DiscoveryApp(tk.Tk):
         if axfr_warning:
             axfr_warning_line = f"  Warning: {axfr_warning}\n"
 
-        self.preflight_var.set(
+        self._set_preflight_text(
             "Preflight estimate — unknown child domain discovery:\n"
             f"  Goal: find child DNS names not already known in the system input.\n"
             f"{preferred_line}"
@@ -775,6 +853,8 @@ class DiscoveryApp(tk.Tk):
         if running:
             self.export_button.configure(state=tk.DISABLED)
             self.cancel_button.configure(state=tk.NORMAL)
+            if not self._preflight_collapsed:
+                self._toggle_preflight(collapse=True)
         else:
             self.cancel_button.configure(state=tk.DISABLED)
 
