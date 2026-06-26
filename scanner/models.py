@@ -39,8 +39,10 @@ class ScanPhase(str, Enum):
     ATTEMPTING_AXFR = "Attempting AXFR"
     TESTING_FOURTH_LEVEL = "Testing 4th-level candidate names"
     TESTING_FIFTH_LEVEL = "Testing 5th-level candidate names"
+    BUILDING_RESULTS = "Building results"
     COMPLETE = "Complete"
     CANCELLED = "Cancelled"
+    ERROR = "Error"
 
 
 class CancellationToken:
@@ -77,6 +79,7 @@ class ScanProgressUpdate:
     phase: str = ""
     message: str = ""
     candidates_started: bool = False
+    progress_indeterminate: bool = True
 
 
 ScanProgressCallback = Callable[[ScanProgressUpdate], None]

@@ -20,6 +20,7 @@ from scanner.input_loader import (
 )
 from scanner.scan_engine import (
     apply_scan_profile,
+    axfr_preflight_warning,
     build_preflight_summary,
     preflight_scan_guidance,
     profile_guidance,
@@ -62,6 +63,11 @@ class DiscoveryApp(tk.Tk):
         self._scan_thread: threading.Thread | None = None
         self._last_scan_result: ScanRunResult | None = None
         self._cancel_token: CancellationToken | None = None
+        self._scan_started_at: datetime | None = None
+        self._latest_progress: ScanProgressUpdate | None = None
+        self._cancel_requested: bool = False
+        self._heartbeat_after_id: str | None = None
+        self._progress_indeterminate: bool = False
 
         self.wordlist_file_var.trace_add("write", self._on_wordlist_path_changed)
 
@@ -495,6 +501,12 @@ class DiscoveryApp(tk.Tk):
                 f"{RECOMMENDED_INPUT_COLUMNS_CSV}\n"
             )
 
+        axfr_state = "ON" if summary.axfr_enabled else "OFF"
+        axfr_warning_line = ""
+        axfr_warning = axfr_preflight_warning(profile, summary.axfr_enabled)
+        if axfr_warning:
+            axfr_warning_line = f"  Warning: {axfr_warning}\n"
+
         self.preflight_var.set(
             "Preflight estimate — unknown child domain discovery:\n"
             f"  Goal: find child DNS names not already known in the system input.\n"
@@ -516,7 +528,8 @@ class DiscoveryApp(tk.Tk):
             f"  Scan size: {size_level}\n"
             f"  Guidance: {size_guidance}\n"
             f"  Review focus: Evidence Review sheet — strong/moderate evidence_value rows.\n"
-            f"  AXFR enabled: {'yes' if summary.axfr_enabled else 'no'}\n"
+            f"  AXFR: {axfr_state}\n"
+            f"{axfr_warning_line}"
             f"  Authoritative NS querying enabled: {'yes' if summary.auth_ns_enabled else 'no'}"
         )
 
@@ -536,17 +549,44 @@ class DiscoveryApp(tk.Tk):
             )
         return True
 
-    def _update_progress(self, update: ScanProgressUpdate) -> None:
-        if update.domain_total > 0:
-            completed_fraction = update.domains_completed / update.domain_total
-            current_domain_fraction = 0.0
-            if update.candidates_started and update.candidates_total > 0:
-                current_domain_fraction = (
-                    update.candidates_tested / update.candidates_total
-                ) / update.domain_total
-            self.progress_var.set(min((completed_fraction + current_domain_fraction) * 100, 100))
+    def _set_progress_bar_indeterminate(self, indeterminate: bool) -> None:
+        if indeterminate == self._progress_indeterminate:
+            if indeterminate:
+                try:
+                    self.progress_bar.start(12)
+                except tk.TclError:
+                    pass
+            return
+        self._progress_indeterminate = indeterminate
+        if indeterminate:
+            self.progress_bar.configure(mode="indeterminate")
+            try:
+                self.progress_bar.start(12)
+            except tk.TclError:
+                pass
+        else:
+            try:
+                self.progress_bar.stop()
+            except tk.TclError:
+                pass
+            self.progress_bar.configure(mode="determinate")
 
-        elapsed_minutes, elapsed_seconds = divmod(int(update.elapsed_seconds), 60)
+    def _format_progress_text(
+        self,
+        update: ScanProgressUpdate | None,
+        *,
+        elapsed_seconds: float,
+        cancel_requested: bool = False,
+    ) -> str:
+        elapsed_minutes, elapsed_seconds_part = divmod(int(elapsed_seconds), 60)
+        if update is None:
+            return (
+                "Phase: Starting scan\n"
+                "Preparing scan...\n"
+                "Candidate testing not started yet\n"
+                f"Elapsed: {elapsed_minutes}m {elapsed_seconds_part}s"
+            )
+
         if update.candidates_started and update.candidates_total > 0:
             candidate_line = (
                 f"Candidates tested: {update.candidates_tested} / {update.candidates_total}"
@@ -559,20 +599,102 @@ class DiscoveryApp(tk.Tk):
             candidate_line = "Candidate testing not started yet"
 
         phase_line = update.phase or "Working"
-        domain_line = (
-            f"Scanning domain {update.domain_index} of {update.domain_total}: {update.current_domain}"
-            if update.domain_total and update.current_domain
-            else update.message or "Preparing scan"
+        if update.domain_total and update.current_domain:
+            domain_line = (
+                f"Scanning domain {update.domain_index} of {update.domain_total}: "
+                f"{update.current_domain}"
+            )
+        else:
+            domain_line = update.message or "Preparing scan"
+
+        lines: list[str] = []
+        if cancel_requested:
+            lines.append("Cancel requested. The scan will stop at the next safe checkpoint.")
+        lines.extend(
+            [
+                f"Phase: {phase_line}",
+                domain_line,
+                candidate_line,
+                f"Completed domains: {update.domains_completed} / {update.domain_total}",
+                f"Elapsed: {elapsed_minutes}m {elapsed_seconds_part}s",
+            ]
         )
+        return "\n".join(lines)
+
+    def _apply_progress_display(
+        self,
+        update: ScanProgressUpdate | None,
+        *,
+        elapsed_seconds: float | None = None,
+    ) -> None:
+        elapsed = elapsed_seconds
+        if elapsed is None:
+            elapsed = update.elapsed_seconds if update is not None else 0.0
+
+        indeterminate = True
+        if update is not None:
+            indeterminate = update.progress_indeterminate
+        self._set_progress_bar_indeterminate(indeterminate)
+
+        if not indeterminate and update is not None and update.domain_total > 0:
+            completed_fraction = update.domains_completed / update.domain_total
+            current_domain_fraction = 0.0
+            if update.candidates_started and update.candidates_total > 0:
+                current_domain_fraction = (
+                    update.candidates_tested / update.candidates_total
+                ) / update.domain_total
+            self.progress_var.set(min((completed_fraction + current_domain_fraction) * 100, 100))
+        elif not indeterminate:
+            self.progress_var.set(0)
+
         self.progress_text_var.set(
-            f"Phase: {phase_line}\n"
-            f"{domain_line}\n"
-            f"{candidate_line}\n"
-            f"Completed domains: {update.domains_completed} / {update.domain_total}\n"
-            f"Elapsed: {elapsed_minutes}m {elapsed_seconds}s"
+            self._format_progress_text(
+                update,
+                elapsed_seconds=elapsed,
+                cancel_requested=self._cancel_requested,
+            )
         )
 
+    def _start_progress_heartbeat(self) -> None:
+        self._stop_progress_heartbeat()
+        self._scan_started_at = datetime.now()
+        self._latest_progress = None
+        self._cancel_requested = False
+        self._set_progress_bar_indeterminate(True)
+        self._tick_progress_heartbeat()
+
+    def _tick_progress_heartbeat(self) -> None:
+        if self._scan_started_at is None:
+            return
+        if self._scan_thread is None or not self._scan_thread.is_alive():
+            self._stop_progress_heartbeat()
+            return
+
+        elapsed = (datetime.now() - self._scan_started_at).total_seconds()
+        self._apply_progress_display(self._latest_progress, elapsed_seconds=elapsed)
+        self._heartbeat_after_id = self.after(1000, self._tick_progress_heartbeat)
+
+    def _stop_progress_heartbeat(self) -> None:
+        if self._heartbeat_after_id is not None:
+            try:
+                self.after_cancel(self._heartbeat_after_id)
+            except tk.TclError:
+                pass
+            self._heartbeat_after_id = None
+        self._scan_started_at = None
+        self._latest_progress = None
+        self._set_progress_bar_indeterminate(False)
+
+    def _update_progress(self, update: ScanProgressUpdate) -> None:
+        self._latest_progress = update
+        elapsed = update.elapsed_seconds
+        if self._scan_started_at is not None:
+            elapsed = (datetime.now() - self._scan_started_at).total_seconds()
+        self._apply_progress_display(update, elapsed_seconds=elapsed)
+
     def _reset_progress_ui(self, message: str = "Scan not running.") -> None:
+        self._stop_progress_heartbeat()
+        self._cancel_requested = False
         self.progress_var.set(0)
         self.progress_text_var.set(message)
         self.cancel_button.configure(state=tk.DISABLED)
@@ -662,8 +784,14 @@ class DiscoveryApp(tk.Tk):
     def _on_cancel_scan(self) -> None:
         if self._cancel_token is not None:
             self._cancel_token.cancel()
-            self._log("Cancellation requested. Scan will stop at the next safe checkpoint.")
+            self._cancel_requested = True
+            self._log(
+                "Cancel requested. The scan will stop at the next safe checkpoint."
+            )
             self.cancel_button.configure(state=tk.DISABLED)
+            if self._scan_started_at is not None:
+                elapsed = (datetime.now() - self._scan_started_at).total_seconds()
+                self._apply_progress_display(self._latest_progress, elapsed_seconds=elapsed)
 
     def _on_run_scan(self) -> None:
         if self._scan_thread and self._scan_thread.is_alive():
@@ -699,6 +827,7 @@ class DiscoveryApp(tk.Tk):
         self._set_scan_running(True)
         self.progress_var.set(0)
         self.progress_text_var.set("Starting scan...")
+        self._start_progress_heartbeat()
 
         def progress(message: str) -> None:
             self.after(0, lambda m=message: self._log(m))
@@ -725,6 +854,8 @@ class DiscoveryApp(tk.Tk):
         self._last_scan_result = result
         self._set_scan_running(False)
         self._cancel_token = None
+        self._stop_progress_heartbeat()
+        self._cancel_requested = False
 
         if result.cancelled:
             self.progress_var.set(
@@ -755,6 +886,8 @@ class DiscoveryApp(tk.Tk):
     def _on_scan_error(self, exc: Exception) -> None:
         self._set_scan_running(False)
         self._cancel_token = None
+        self._stop_progress_heartbeat()
+        self._cancel_requested = False
         self._reset_progress_ui("Scan failed.")
         self._log(f"Scan failed: {exc.__class__.__name__}: {exc}")
         messagebox.showerror("Scan error", f"The scan encountered an error:\n{exc}")

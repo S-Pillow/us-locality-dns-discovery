@@ -31,6 +31,7 @@ are not required.
 
 4. Select scan profile
    Start with Light Evidence for a 10–25 domain sample (default).
+   Keep Attempt AXFR off for first-pass Light Evidence scans unless you need it.
 
 5. Review Preflight Summary
    Look for "Preferred input format detected" when using the six-column CSV.

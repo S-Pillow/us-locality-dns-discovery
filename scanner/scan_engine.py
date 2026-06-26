@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import csv
+import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +111,12 @@ PARTIAL_SCAN_MESSAGE = (
     "This scan was cancelled before all domains were completed. Results are partial."
 )
 
+PHASE_HEARTBEAT_INTERVAL_SECONDS = 20
+
+AXFR_LIGHT_PROFILE_WARNING = (
+    "AXFR may slow down Light Evidence scans. For first-pass sampling, AXFR OFF is usually faster."
+)
+
 
 def apply_scan_profile(options: ScanOptions) -> ScanOptions:
     """Map operator scan profile to wordlist and DNS option defaults."""
@@ -167,6 +175,13 @@ def profile_guidance(profile: ScanProfile) -> str:
         ScanProfile.DEEP: "Deep Targeted is for 1–3 domains with broader wordlists.",
     }
     return messages.get(profile, "")
+
+
+def axfr_preflight_warning(scan_profile: ScanProfile, axfr_enabled: bool) -> str | None:
+    """Return operator warning when Light Evidence is combined with AXFR enabled."""
+    if scan_profile == ScanProfile.LIGHT and axfr_enabled:
+        return AXFR_LIGHT_PROFILE_WARNING
+    return None
 
 
 def validate_domain_file(path: Path) -> tuple[bool, str]:
@@ -373,6 +388,7 @@ def _emit_progress(
     if progress_update is None:
         return
     elapsed = (datetime.now() - started_at).total_seconds()
+    progress_indeterminate = not (candidates_started and candidates_total > 0)
     progress_update(
         ScanProgressUpdate(
             domain_index=domain_index,
@@ -385,8 +401,60 @@ def _emit_progress(
             phase=phase,
             message=message,
             candidates_started=candidates_started,
+            progress_indeterminate=progress_indeterminate,
         )
     )
+
+
+class _PhaseHeartbeat:
+    """Emit a non-spammy log line when a slow DNS phase runs longer than expected."""
+
+    def __init__(
+        self,
+        *,
+        domain: str,
+        phase: str,
+        progress: ProgressCallback | None,
+        messages: list[str],
+        interval: float = PHASE_HEARTBEAT_INTERVAL_SECONDS,
+    ) -> None:
+        self._domain = domain
+        self._phase = phase
+        self._progress = progress
+        self._messages = messages
+        self._interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _PhaseHeartbeat:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_args) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def _heartbeat_message(self) -> str:
+        phase_lower = self._phase.lower()
+        if "axfr" in phase_lower:
+            return f"Still attempting AXFR for {self._domain}…"
+        if "authoritative" in phase_lower or "nameserver" in phase_lower:
+            return f"Still discovering authoritative nameservers for {self._domain}…"
+        if "candidate" in phase_lower:
+            return f"Still testing candidate names for {self._domain}…"
+        if "base" in phase_lower or "soa" in phase_lower:
+            return f"Still checking base SOA/NS for {self._domain}…"
+        return f"Still {self._phase} for {self._domain}…"
+
+    def _run(self) -> None:
+        if self._stop.wait(self._interval):
+            return
+        while not self._stop.is_set():
+            _emit(self._heartbeat_message(), self._progress, self._messages)
+            if self._stop.wait(self._interval):
+                break
 
 
 def log_wordlist_plan(
@@ -917,17 +985,17 @@ def _attempt_axfr(base_domain: str, ns_host: str, ns_ip: str) -> tuple[list[Disc
                             ttl=rdataset.ttl,
                         )
                     )
-        return findings, f"AXFR succeeded via {ns_host} ({ns_ip}) — {len(findings)} record(s) discovered"
+        return findings, f"AXFR succeeded — {len(findings)} record(s) via {ns_host}"
     except dns.exception.FormError:
-        return [], f"AXFR not allowed via {ns_host} ({ns_ip}): form error"
+        return [], f"AXFR refused/blocked via {ns_host} ({ns_ip}) — normal for most zones"
     except dns.zone.NoSOA:
-        return [], f"AXFR failed via {ns_host} ({ns_ip}): no SOA in transfer"
+        return [], f"AXFR refused/blocked via {ns_host} ({ns_ip}) — no SOA in transfer"
     except dns.exception.Timeout:
         return [], f"AXFR timed out via {ns_host} ({ns_ip})"
     except OSError as exc:
-        return [], f"AXFR refused/failed via {ns_host} ({ns_ip}): {exc}"
+        return [], f"AXFR refused/blocked via {ns_host} ({ns_ip}): {exc}"
     except dns.exception.DNSException as exc:
-        return [], f"AXFR blocked via {ns_host} ({ns_ip}): {exc.__class__.__name__}"
+        return [], f"AXFR refused/blocked via {ns_host} ({ns_ip}): {exc.__class__.__name__}"
 
 
 def _wildcard_probe(base_domain: str) -> tuple[bool, list[str]]:
@@ -1001,84 +1069,92 @@ def _test_candidates(
     subdelegation_count = 0
     candidate_record_count = 0
     tested = 0
+    if not candidates:
+        return tested
 
-    for candidate_index, candidate in enumerate(candidates, start=1):
-        if cancel_check and cancel_check():
-            result.notes.append(PARTIAL_SCAN_MESSAGE)
-            _emit(
-                "  Scan cancellation requested; stopping candidate testing for this domain.",
-                progress,
-                messages,
+    with _PhaseHeartbeat(
+        domain=domain,
+        phase=phase.value,
+        progress=progress,
+        messages=messages,
+    ):
+        for candidate_index, candidate in enumerate(candidates, start=1):
+            if cancel_check and cancel_check():
+                result.notes.append(PARTIAL_SCAN_MESSAGE)
+                _emit(
+                    "  Scan cancellation requested; stopping candidate testing for this domain.",
+                    progress,
+                    messages,
+                )
+                break
+
+            overall_index = candidates_offset + candidate_index
+            if candidate_index == 1 or candidate_index % CANDIDATE_CANCEL_CHECK_INTERVAL == 0:
+                _emit_progress(
+                    progress_update,
+                    domain_index=domain_index,
+                    domain_total=domain_total,
+                    current_domain=domain,
+                    candidates_tested=overall_index,
+                    candidates_total=candidates_total,
+                    domains_completed=domains_completed,
+                    started_at=started_at,
+                    phase=phase.value,
+                    message=(
+                        f"{phase.value}: {overall_index} / {candidates_total} candidates tested"
+                    ),
+                    candidates_started=True,
+                )
+
+            ns_findings, ns_candidate_errors = _query_records(
+                candidate,
+                (RecordType.NS,),
+                resolver,
+                source_method="generated_candidate",
+                classification=FindingClassification.DELEGATED_CHILD_ZONE,
+                base_domain=domain,
             )
-            break
+            if ns_findings:
+                subdelegation_count += 1
+                for item in ns_findings:
+                    item.confidence = _confidence_for(
+                        wildcard_suspected, item.record_type, item.classification
+                    )
+                    result.records.append(item)
+                _emit(
+                    f"    Delegated child zone: {candidate} NS "
+                    f"{', '.join(item.value for item in ns_findings)}",
+                    progress,
+                    messages,
+                )
 
-        overall_index = candidates_offset + candidate_index
-        if candidate_index % CANDIDATE_CANCEL_CHECK_INTERVAL == 0:
-            _emit_progress(
-                progress_update,
-                domain_index=domain_index,
-                domain_total=domain_total,
-                current_domain=domain,
-                candidates_tested=overall_index,
-                candidates_total=candidates_total,
-                domains_completed=domains_completed,
-                started_at=started_at,
-                phase=phase.value,
-                message=(
-                    f"{phase.value}: {overall_index} / {candidates_total} candidates tested"
-                ),
-                candidates_started=True,
+            other_findings, candidate_errors = _query_records(
+                candidate,
+                CANDIDATE_RECORD_TYPES,
+                resolver,
+                source_method="generated_candidate",
+                classification=FindingClassification.STANDARD_RECORD,
+                base_domain=domain,
             )
-
-        ns_findings, ns_candidate_errors = _query_records(
-            candidate,
-            (RecordType.NS,),
-            resolver,
-            source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
-            base_domain=domain,
-        )
-        if ns_findings:
-            subdelegation_count += 1
-            for item in ns_findings:
+            for item in other_findings:
                 item.confidence = _confidence_for(
                     wildcard_suspected, item.record_type, item.classification
                 )
+                candidate_record_count += 1
                 result.records.append(item)
-            _emit(
-                f"    Delegated child zone: {candidate} NS "
-                f"{', '.join(item.value for item in ns_findings)}",
-                progress,
-                messages,
-            )
 
-        other_findings, candidate_errors = _query_records(
-            candidate,
-            CANDIDATE_RECORD_TYPES,
-            resolver,
-            source_method="generated_candidate",
-            classification=FindingClassification.STANDARD_RECORD,
-            base_domain=domain,
-        )
-        for item in other_findings:
-            item.confidence = _confidence_for(
-                wildcard_suspected, item.record_type, item.classification
-            )
-            candidate_record_count += 1
-            result.records.append(item)
+            tested = candidate_index
 
-        tested = candidate_index
-
-        for error in ns_candidate_errors + candidate_errors:
-            result.records.append(
-                DiscoveredRecord(
-                    fqdn=candidate,
-                    record_type=None,
-                    value=error,
-                    source_method="recursive_resolver",
-                    classification=FindingClassification.QUERY_ERROR,
+            for error in ns_candidate_errors + candidate_errors:
+                result.records.append(
+                    DiscoveredRecord(
+                        fqdn=candidate,
+                        record_type=None,
+                        value=error,
+                        source_method="recursive_resolver",
+                        classification=FindingClassification.QUERY_ERROR,
+                    )
                 )
-            )
 
     _emit(
         f"  {phase.value}: {tested} tested, "
@@ -1130,67 +1206,76 @@ def scan_domain(
         candidates_started=False,
     )
 
-    wildcard_suspected, wildcard_logs = _wildcard_probe(domain)
-    result.wildcard_suspected = wildcard_suspected
-    for line in wildcard_logs:
-        _emit(f"  {line}", progress, messages)
+    wildcard_suspected = False
+    wildcard_logs: list[str] = []
+    with _PhaseHeartbeat(
+        domain=domain,
+        phase=ScanPhase.CHECKING_BASE.value,
+        progress=progress,
+        messages=messages,
+    ):
+        wildcard_suspected, wildcard_logs = _wildcard_probe(domain)
+        result.wildcard_suspected = wildcard_suspected
+        for line in wildcard_logs:
+            _emit(f"  {line}", progress, messages)
+
+        resolver = _make_resolver()
+        base_findings, base_errors = _query_records(
+            domain,
+            BASE_RECORD_TYPES,
+            resolver,
+            source_method="recursive_resolver",
+            classification=FindingClassification.BASE_DOMAIN_RECORD,
+            base_domain=domain,
+        )
+        result.records.extend(base_findings)
+
+        base_zone_findings = [
+            item
+            for item in base_findings
+            if item.classification == FindingClassification.BASE_ZONE_EXISTS
+            or (item.record_type == RecordType.SOA and _names_match(item.fqdn, domain))
+        ]
+        other_base_findings = [item for item in base_findings if item not in base_zone_findings]
+
+        if base_zone_findings:
+            for item in base_zone_findings:
+                _emit(
+                    f"    [{item.classification.value}] {item.fqdn} SOA {item.value} "
+                    f"({SOA_AUTHORITY_NOTE})",
+                    progress,
+                    messages,
+                )
+        if other_base_findings:
+            _emit(f"  Base domain: {len(other_base_findings)} record(s) discovered", progress, messages)
+            for item in other_base_findings:
+                _emit(
+                    f"    [{item.classification.value}] {item.fqdn} {item.record_type.value} {item.value}",
+                    progress,
+                    messages,
+                )
+        if not base_findings:
+            _emit(
+                f"  Base domain: No records discovered using tested methods for {domain}",
+                progress,
+                messages,
+            )
+            result.notes.append(f"No records discovered using tested methods for base domain {domain}")
+
+        for error in base_errors:
+            _emit(f"  Query error: {error}", progress, messages)
+            result.records.append(
+                DiscoveredRecord(
+                    fqdn=domain,
+                    record_type=None,
+                    value=error,
+                    source_method="recursive_resolver",
+                    classification=FindingClassification.QUERY_ERROR,
+                )
+            )
 
     resolver = _make_resolver()
-    base_findings, base_errors = _query_records(
-        domain,
-        BASE_RECORD_TYPES,
-        resolver,
-        source_method="recursive_resolver",
-        classification=FindingClassification.BASE_DOMAIN_RECORD,
-        base_domain=domain,
-    )
-    result.records.extend(base_findings)
 
-    base_zone_findings = [
-        item
-        for item in base_findings
-        if item.classification == FindingClassification.BASE_ZONE_EXISTS
-        or (item.record_type == RecordType.SOA and _names_match(item.fqdn, domain))
-    ]
-    other_base_findings = [item for item in base_findings if item not in base_zone_findings]
-
-    if base_zone_findings:
-        for item in base_zone_findings:
-            _emit(
-                f"    [{item.classification.value}] {item.fqdn} SOA {item.value} "
-                f"({SOA_AUTHORITY_NOTE})",
-                progress,
-                messages,
-            )
-    if other_base_findings:
-        _emit(f"  Base domain: {len(other_base_findings)} record(s) discovered", progress, messages)
-        for item in other_base_findings:
-            _emit(
-                f"    [{item.classification.value}] {item.fqdn} {item.record_type.value} {item.value}",
-                progress,
-                messages,
-            )
-    if not base_findings:
-        _emit(
-            f"  Base domain: No records discovered using tested methods for {domain}",
-            progress,
-            messages,
-        )
-        result.notes.append(f"No records discovered using tested methods for base domain {domain}")
-
-    for error in base_errors:
-        _emit(f"  Query error: {error}", progress, messages)
-        result.records.append(
-            DiscoveredRecord(
-                fqdn=domain,
-                record_type=None,
-                value=error,
-                source_method="recursive_resolver",
-                classification=FindingClassification.QUERY_ERROR,
-            )
-        )
-
-    ns_hosts, ns_findings, ns_errors = discover_authoritative_nameservers(domain)
     _emit_progress(
         progress_update,
         domain_index=domain_index,
@@ -1204,80 +1289,95 @@ def scan_domain(
         message=f"Discovering authoritative nameservers for {domain}",
         candidates_started=False,
     )
-    if not ns_hosts:
-        delegated_ns, delegated_findings, delegated_errors = discover_delegation_nameservers(domain)
-        if delegated_ns:
-            ns_hosts = delegated_ns
-            _emit(
-                f"  Authoritative nameservers discovered via parent-zone delegation lookup: "
-                f"{', '.join(ns_hosts)}",
-                progress,
-                messages,
-            )
-        for item in delegated_findings:
+    ns_hosts: list[str] = []
+    ns_findings: list[DiscoveredRecord] = []
+    ns_errors: list[str] = []
+    with _PhaseHeartbeat(
+        domain=domain,
+        phase=ScanPhase.DISCOVERING_AUTH_NS.value,
+        progress=progress,
+        messages=messages,
+    ):
+        ns_hosts, ns_findings, ns_errors = discover_authoritative_nameservers(domain)
+        if not ns_hosts:
+            delegated_ns, delegated_findings, delegated_errors = discover_delegation_nameservers(domain)
+            if delegated_ns:
+                ns_hosts = delegated_ns
+                _emit(
+                    f"  Authoritative nameservers discovered via parent-zone delegation lookup: "
+                    f"{', '.join(ns_hosts)}",
+                    progress,
+                    messages,
+                )
+            for item in delegated_findings:
+                if item not in result.records:
+                    result.records.append(item)
+            for error in delegated_errors:
+                _emit(f"  Parent delegation NS lookup error: {error}", progress, messages)
+
+        for item in ns_findings:
             if item not in result.records:
                 result.records.append(item)
-        for error in delegated_errors:
-            _emit(f"  Parent delegation NS lookup error: {error}", progress, messages)
+        for error in ns_errors:
+            _emit(f"  Authoritative NS lookup error: {error}", progress, messages)
 
-    for item in ns_findings:
-        if item not in result.records:
-            result.records.append(item)
-    for error in ns_errors:
-        _emit(f"  Authoritative NS lookup error: {error}", progress, messages)
-
-    if not ns_hosts:
-        soa_mname_hosts = _extract_soa_mname_hosts(result)
-        if soa_mname_hosts:
-            ns_hosts = soa_mname_hosts
-            _emit(
-                f"  Authoritative nameservers: none in NS answers; "
-                f"using {SOA_MNAME_INDICATOR_NOTE}: {', '.join(ns_hosts)}",
-                progress,
-                messages,
-            )
-            result.notes.append(
-                f"Authoritative indicator from SOA MNAME: {', '.join(ns_hosts)}"
-            )
-        else:
-            _emit(
-                f"  Authoritative nameservers: No records discovered using tested methods for {domain}",
-                progress,
-                messages,
-            )
-    else:
-        _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
-
-    if resolved_options.query_authoritative_ns and ns_hosts:
-        for ns_host in ns_hosts:
-            ns_ips = _resolve_nameserver_ips(ns_host)
-            if not ns_ips:
-                _emit(f"  Could not resolve IP for nameserver {ns_host}", progress, messages)
-                continue
-            for ns_ip in ns_ips:
-                auth_resolver = _make_resolver(ns_ip)
-                auth_findings, auth_errors = _query_records(
-                    domain,
-                    BASE_RECORD_TYPES,
-                    auth_resolver,
-                    source_method="authoritative_nameserver",
-                    classification=FindingClassification.BASE_DOMAIN_RECORD,
-                    nameserver=f"{ns_host} ({ns_ip})",
-                    base_domain=domain,
+        if not ns_hosts:
+            soa_mname_hosts = _extract_soa_mname_hosts(result)
+            if soa_mname_hosts:
+                ns_hosts = soa_mname_hosts
+                _emit(
+                    f"  Authoritative nameservers: none in NS answers; "
+                    f"using {SOA_MNAME_INDICATOR_NOTE}: {', '.join(ns_hosts)}",
+                    progress,
+                    messages,
                 )
-                if auth_findings:
-                    _emit(
-                        f"  Auth NS {ns_host} ({ns_ip}): {len(auth_findings)} base record(s)",
-                        progress,
-                        messages,
-                    )
-                for item in auth_findings:
-                    if item not in result.records:
-                        result.records.append(item)
-                for error in auth_errors:
-                    _emit(f"  Auth NS query error ({ns_host}): {error}", progress, messages)
+                result.notes.append(
+                    f"Authoritative indicator from SOA MNAME: {', '.join(ns_hosts)}"
+                )
+            else:
+                _emit(
+                    f"  Authoritative nameservers: No records discovered using tested methods for {domain}",
+                    progress,
+                    messages,
+                )
+        else:
+            _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
 
-    if resolved_options.attempt_axfr and ns_hosts:
+        if resolved_options.query_authoritative_ns and ns_hosts:
+            for ns_host in ns_hosts:
+                ns_ips = _resolve_nameserver_ips(ns_host)
+                if not ns_ips:
+                    _emit(f"  Could not resolve IP for nameserver {ns_host}", progress, messages)
+                    continue
+                for ns_ip in ns_ips:
+                    auth_resolver = _make_resolver(ns_ip)
+                    auth_findings, auth_errors = _query_records(
+                        domain,
+                        BASE_RECORD_TYPES,
+                        auth_resolver,
+                        source_method="authoritative_nameserver",
+                        classification=FindingClassification.BASE_DOMAIN_RECORD,
+                        nameserver=f"{ns_host} ({ns_ip})",
+                        base_domain=domain,
+                    )
+                    if auth_findings:
+                        _emit(
+                            f"  Auth NS {ns_host} ({ns_ip}): {len(auth_findings)} base record(s)",
+                            progress,
+                            messages,
+                        )
+                    for item in auth_findings:
+                        if item not in result.records:
+                            result.records.append(item)
+                    for error in auth_errors:
+                        _emit(f"  Auth NS query error ({ns_host}): {error}", progress, messages)
+
+    if not resolved_options.attempt_axfr:
+        _emit(f"  AXFR skipped for {domain} (disabled in scan options)", progress, messages)
+    elif not ns_hosts:
+        _emit(f"  AXFR skipped for {domain} (no authoritative nameservers found)", progress, messages)
+    elif resolved_options.attempt_axfr and ns_hosts:
+        _emit(f"  AXFR attempted for {domain}", progress, messages)
         _emit_progress(
             progress_update,
             domain_index=domain_index,
@@ -1292,30 +1392,36 @@ def scan_domain(
             candidates_started=False,
         )
         axfr_any = False
-        for ns_host in ns_hosts:
-            ns_ips = _resolve_nameserver_ips(ns_host)
-            if not ns_ips:
-                continue
-            for ns_ip in ns_ips:
-                axfr_records, axfr_message = _attempt_axfr(domain, ns_host, ns_ip)
-                _emit(f"  {axfr_message}", progress, messages)
-                if axfr_records:
-                    axfr_any = True
-                    result.records.extend(axfr_records)
-                else:
-                    result.records.append(
-                        DiscoveredRecord(
-                            fqdn=domain,
-                            record_type=None,
-                            value=axfr_message,
-                            source_method="axfr",
-                            classification=FindingClassification.AXFR_BLOCKED,
-                            nameserver=f"{ns_host} ({ns_ip})",
+        with _PhaseHeartbeat(
+            domain=domain,
+            phase=ScanPhase.ATTEMPTING_AXFR.value,
+            progress=progress,
+            messages=messages,
+        ):
+            for ns_host in ns_hosts:
+                ns_ips = _resolve_nameserver_ips(ns_host)
+                if not ns_ips:
+                    continue
+                for ns_ip in ns_ips:
+                    axfr_records, axfr_message = _attempt_axfr(domain, ns_host, ns_ip)
+                    _emit(f"  {axfr_message}", progress, messages)
+                    if axfr_records:
+                        axfr_any = True
+                        result.records.extend(axfr_records)
+                    else:
+                        result.records.append(
+                            DiscoveredRecord(
+                                fqdn=domain,
+                                record_type=None,
+                                value=axfr_message,
+                                source_method="axfr",
+                                classification=FindingClassification.AXFR_BLOCKED,
+                                nameserver=f"{ns_host} ({ns_ip})",
+                            )
                         )
-                    )
         if not axfr_any:
             _emit(
-                "  AXFR: no successful zone transfers using tested methods (refused/timeout/failure is expected)",
+                "  AXFR: no zone transfers succeeded (refused/timeout is normal for most zones)",
                 progress,
                 messages,
             )
@@ -1339,7 +1445,7 @@ def scan_domain(
         started_at=scan_started,
         phase=ScanPhase.TESTING_FOURTH_LEVEL.value,
         message=(
-            f"Candidate testing not started yet ({candidate_total} estimated)"
+            f"Preparing candidate list ({candidate_total} names)"
             if candidate_total
             else "No candidate names to test for this domain"
         ),
@@ -1435,6 +1541,21 @@ def run_scan(
         progress_callback,
         messages,
     )
+
+    if progress_update:
+        _emit_progress(
+            progress_update,
+            domain_index=0,
+            domain_total=0,
+            current_domain="",
+            candidates_tested=0,
+            candidates_total=0,
+            domains_completed=0,
+            started_at=started_at,
+            phase=ScanPhase.PREPARING_INPUT.value,
+            message="Preparing input",
+            candidates_started=False,
+        )
 
     resolved_options = apply_scan_profile(scan_input.options)
     scan_input = ScanInput(
@@ -1582,6 +1703,21 @@ def run_scan(
                 )
             )
 
+    if progress_update:
+        _emit_progress(
+            progress_update,
+            domain_index=len(result.domain_results),
+            domain_total=len(domain_names),
+            current_domain="",
+            candidates_tested=0,
+            candidates_total=0,
+            domains_completed=len(result.domain_results),
+            started_at=started_at,
+            phase=ScanPhase.BUILDING_RESULTS.value,
+            message="Building results",
+            candidates_started=False,
+        )
+
     finished_at = datetime.now()
     result.finished_at = finished_at
     result.elapsed_seconds = (finished_at - started_at).total_seconds()
@@ -1620,5 +1756,21 @@ def run_scan(
         progress_callback,
         messages,
     )
+
+    if progress_update:
+        final_phase = ScanPhase.CANCELLED if cancelled else ScanPhase.COMPLETE
+        _emit_progress(
+            progress_update,
+            domain_index=len(result.domain_results),
+            domain_total=len(domain_names),
+            current_domain="",
+            candidates_tested=total_candidates,
+            candidates_total=total_candidates,
+            domains_completed=len(result.domain_results),
+            started_at=started_at,
+            phase=final_phase.value,
+            message=final_phase.value,
+            candidates_started=total_candidates > 0,
+        )
 
     return result
