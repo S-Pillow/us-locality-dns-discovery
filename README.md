@@ -2,6 +2,22 @@
 
 Internal-use **standalone Windows desktop utility** (Python 3.11+) for discovering visible DNS activity and possible 4th/5th-level subdelegations under externally managed `.us` locality 3rd-level domains.
 
+**What this tool does:** runs controlled DNS lookups against a list of 3rd-level domains and selected candidate labels, then exports discovery evidence for human review.
+
+**What this tool cannot prove:** absence of discovered records is **not** proof that no subdelegations or DNS records exist. The tool does not perform complete zone enumeration, passive DNS, OSINT, or web scraping.
+
+## Operator quick-start
+
+1. Open `USLocalityDNSDiscovery.exe` (or run `python app.py` from source).
+2. Select a `.txt` or `.csv` file containing 3rd-level domains (one per line; `#` comments allowed).
+3. Choose **Wordlist Sources** for the batch size you are running (see [Recommended batch sizes](#recommended-batch-sizes)).
+4. Review the **Preflight Summary** (domains, sources, estimated candidates, warning level).
+5. Click **Run Scan**.
+6. Wait for completion, or click **Cancel Scan** if you need to stop early (partial results may still be exported).
+7. Click **Export Results**.
+8. Choose **XLSX workbook (recommended)** for coworker review.
+9. Open the workbook and review the **Summary** sheet first, then **Findings** for detail.
+
 ## Current status (working prototype)
 
 This version includes a **functional DNS discovery scan engine** with **tiered wordlist source controls**. It performs controlled DNS lookups using `dnspython` when you click **Run Scan**.
@@ -47,6 +63,28 @@ Before scanning, the log reports:
 
 Selected wordlists are **not complete** — they are starting points for discovery only.
 
+## Recommended batch sizes
+
+Plan smaller batches for deeper wordlist coverage. For a full locality list (~157 external-DM domains), run multiple batches rather than one very-large scan.
+
+| Batch type | Domains | Suggested wordlist sources |
+|------------|---------|----------------------------|
+| **Light scan** | 25–50 | RFC/locality baseline; optionally Common DNS/web labels |
+| **Normal evidence scan** | 10–25 | RFC/locality baseline + Common DNS/web labels + Civic departments |
+| **Deep scan** | 3–10 | Add Public services, Schools/libraries, Delegated-manager clues, and/or a custom wordlist |
+
+Higher candidate counts mean longer run times. The preflight summary shows estimated candidates per domain and a warning level (`low`, `moderate`, `large`, `very large`). Confirm before starting when totals reach 10,000+ or 50,000+ candidates.
+
+## How to choose wordlist sources
+
+- **RFC/locality baseline** — start here for every batch; enables limited 5th-level `ci`/`co` branch testing.
+- **Common DNS/web labels** — adds typical hostnames (`www`, `mail`, `ns1`, etc.); good for light/normal batches.
+- **Civic departments** — department-style labels; use for normal evidence scans.
+- **Public services / Schools / Delegated-manager clues** — broader label sets; reserve for deep scans on small domain counts.
+- **Custom wordlist** — browse for a `.txt` or `.csv` file, then check **Include custom wordlist**. Preflight lists custom labels only when that box is checked.
+
+Turn off sources you do not need to reduce scan time and noise.
+
 ## How to run
 
 Requires **Python 3.11+** with Tkinter (included in standard Windows Python installers).
@@ -79,7 +117,14 @@ Output:
 
 - `dist/USLocalityDNSDiscovery.exe`
 
-Double-click the EXE to launch the GUI. Python does **not** need to be installed on the target PC.
+Double-click the EXE to launch the GUI. Python does **not** need to be installed on the target PC. The EXE runs windowed (no console window).
+
+### Where reports are saved
+
+| Mode | How to run | Report output folder |
+|------|------------|----------------------|
+| Source | `python app.py` | `output/` under the project root |
+| Packaged EXE | `dist/USLocalityDNSDiscovery.exe` | `output/` next to the EXE (e.g. `dist/output/`) |
 
 ### Packaged paths and wordlists
 
@@ -108,14 +153,18 @@ Conservative DNS timeouts are used (3s per query, 5s lifetime) to avoid hanging 
 
 ## Exporting results
 
-After a scan completes, **Export Results** becomes enabled. Choose:
+After a scan completes or is cancelled with partial results, **Export Results** becomes enabled.
+
+**For coworker review, use the XLSX workbook** — it is the primary operator deliverable with Summary, Findings, settings, and warnings in one file.
+
+Choose export format:
 
 - **XLSX workbook (recommended)** — operator-facing Excel review package
 - **Findings CSV** — technical findings export (15-column contract)
 - **JSON** — advanced/debugging export
 - **All formats** — XLSX, findings CSV, summary CSV, and JSON
 
-Reports are written to `output/` with timestamped filenames such as:
+Reports are written to the [output folder for your mode](#where-reports-are-saved) with timestamped filenames such as:
 
 - `us_locality_dns_report_YYYYMMDD_HHMMSS.xlsx`
 - `us_locality_dns_discovery_YYYYMMDD_HHMMSS.csv`
@@ -126,18 +175,33 @@ Reports are written to `output/` with timestamped filenames such as:
 
 | Sheet | Purpose |
 |-------|---------|
-| **Summary** | One row per base domain with scan status, evidence summary, and counts |
-| **Findings** | Detailed finding rows (same columns as findings CSV) |
-| **Scan Settings** | Scan metadata, wordlist sources, timeouts, and limitation note |
-| **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, and query errors |
+| **Summary** | **Start here.** One row per base domain with `scan_status`, evidence summary, nameserver/AXFR/wildcard flags, and counts. Use this sheet to triage which domains need follow-up. |
+| **Findings** | Detailed rows for each discovered record, candidate test, or notable outcome (same columns as findings CSV). Use after Summary to inspect individual DNS evidence. |
+| **Scan Settings** | Scan metadata, wordlist sources, DNS timeouts, completion/cancellation flags, and the discovery limitation note. |
+| **Errors Warnings** | Domain-level AXFR issues, wildcard warnings, query errors, and partial-scan notices. |
 
 Summary `scan_status` values use discovery-based wording such as *Possible subdelegation discovered*, *DNS activity discovered*, *Base domain records only*, and *No records discovered using tested methods*. Row highlighting is applied for readability; status text carries the meaning.
+
+**Summary vs. Findings:** Summary is the per-domain rollup for batch review; Findings is the line-item evidence behind those rollups.
 
 Every report includes:
 
 > DNS discovery results show only records found through the tested methods. No records discovered does not prove that no subdelegations or DNS records exist.
 
 Reports are created only when you click **Export Results** — scans do not auto-write report files.
+
+### Cancellation and partial results
+
+If you click **Cancel Scan**, the engine stops at the next safe checkpoint (between domains or during candidate batches). The log notes that the scan was cancelled and how many domains completed.
+
+When at least one domain finished before cancellation:
+
+- **Export Results** is enabled
+- The XLSX **Scan Settings** sheet records `scan_cancelled=true`, `scan_completed=false`, and `partial_results=true`
+- The **Errors Warnings** sheet includes a partial-scan notice
+- Summary and Findings contain only domains scanned before cancellation
+
+Partial exports are still valid discovery evidence for the domains that completed; they do not represent the full input list.
 
 ## Large scan controls
 
@@ -162,7 +226,7 @@ During a scan:
 
 **Discovery** means records found through tested methods only.
 
-- **No records discovered using tested methods** does **not** prove that no records or subdelegations exist.
+- **No records discovered using tested methods** does **not** prove that no records or subdelegations exist. A domain may have labels the wordlists never tested, records only visible from other vantage points, or activity outside this tool’s query scope.
 - This tool must not claim complete zone enumeration.
 - Reports use discovery-based language, not assertions of absence.
 
