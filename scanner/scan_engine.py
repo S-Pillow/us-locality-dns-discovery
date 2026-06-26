@@ -678,6 +678,11 @@ def _send_dns_query(
     return None, last_error
 
 
+def _owner_matches_queried(owner: str, queried: str) -> bool:
+    """True when a DNS RRset owner is the queried name (normalized FQDN)."""
+    return _names_match(owner, queried)
+
+
 def _soa_classification(fqdn: str, base_domain: str, from_authority: bool) -> FindingClassification:
     if _names_match(fqdn, base_domain):
         return FindingClassification.BASE_ZONE_EXISTS
@@ -732,9 +737,8 @@ def _parse_dns_response(
     nameserver: str | None,
     confidence: str = "normal",
 ) -> list[DiscoveredRecord]:
-    """Extract ANSWER records and AUTHORITY-section SOA evidence from a DNS response."""
+    """Extract owner-matching ANSWER records and AUTHORITY-section SOA evidence."""
     findings: list[DiscoveredRecord] = []
-    qname = _dns_name(fqdn)
     authoritative_response = bool(response.flags & dns.flags.AA)
     saw_soa_answer = False
 
@@ -745,6 +749,8 @@ def _parse_dns_response(
         except ValueError:
             continue
         owner = _display_name(rrset.name.to_text())
+        if not _owner_matches_queried(owner, queried):
+            continue
         if parsed_type == RecordType.SOA:
             saw_soa_answer = True
         ttl = rrset.ttl
@@ -762,13 +768,8 @@ def _parse_dns_response(
                     authoritative_response=authoritative_response,
                 )
                 continue
-            if record_type == RecordType.NS:
-                if parsed_type == RecordType.NS:
-                    if owner != queried:
-                        continue
-                    item_classification = FindingClassification.DELEGATED_CHILD_ZONE
-                else:
-                    item_classification = FindingClassification.STANDARD_RECORD
+            if record_type == RecordType.NS and parsed_type == RecordType.NS:
+                item_classification = FindingClassification.DELEGATED_CHILD_ZONE
             else:
                 item_classification = classification
             findings.append(
@@ -788,12 +789,13 @@ def _parse_dns_response(
         for rrset in response.authority:
             if rrset.rdtype != dns.rdatatype.SOA:
                 continue
-            if rrset.name != qname:
+            owner = _display_name(rrset.name.to_text())
+            if not _owner_matches_queried(owner, queried):
                 continue
             for rdata in rrset:
                 _append_soa_finding(
                     findings,
-                    fqdn=_display_name(rrset.name.to_text()),
+                    fqdn=owner,
                     base_domain=base_domain,
                     rdata=rdata,
                     ttl=rrset.ttl,
@@ -926,11 +928,12 @@ def _parent_domain(domain: str) -> str | None:
 
 def _nameservers_from_response_answer(response: dns.message.Message, base_domain: str) -> list[str]:
     hosts: list[str] = []
-    qname = _dns_name(base_domain)
+    queried = _display_name(base_domain)
     for rrset in response.answer:
         if rrset.rdtype != dns.rdatatype.NS:
             continue
-        if rrset.name != qname:
+        owner = _display_name(rrset.name.to_text())
+        if not _owner_matches_queried(owner, queried):
             continue
         for rdata in rrset:
             hosts.append(_query_name(rdata.target.to_text()))
