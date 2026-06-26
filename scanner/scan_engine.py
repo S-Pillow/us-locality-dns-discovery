@@ -615,6 +615,44 @@ def _names_match(left: str, right: str) -> bool:
     return _display_name(left) == _display_name(right)
 
 
+def _normalize_dns_error_text(error: str) -> str:
+    """Map low-level DNS/transport errors to plain operator wording."""
+    lower = error.lower()
+    if "errno 10051" in lower or "network unreachable" in lower or "unreachable network" in lower:
+        return "network unreachable"
+    if "timeout" in lower:
+        return "timed out"
+    if "refused" in lower or "notauth" in lower or "servfail" in lower:
+        return "query refused or blocked"
+    if "no resolver" in lower:
+        return "no resolver configured"
+    if "unknown error" in lower and "errno" in lower:
+        return "network unreachable / socket error"
+    return "DNS query error"
+
+
+def _summarize_auth_ns_query_errors(
+    errors: list[str],
+    *,
+    ns_host: str,
+    domain: str,
+    record_type_count: int,
+) -> str:
+    if not errors:
+        return ""
+    normalized = {_normalize_dns_error_text(error) for error in errors}
+    if len(normalized) == 1:
+        reason = next(iter(normalized))
+    else:
+        reason = " / ".join(sorted(normalized))
+    type_label = "record type" if record_type_count == 1 else "record types"
+    return (
+        f"Authoritative direct query warning for {ns_host} on {domain}: {reason} "
+        f"while checking {record_type_count} {type_label}. "
+        f"Continuing with recursive DNS results and candidate testing."
+    )
+
+
 def _send_dns_query(
     fqdn: str,
     record_type: RecordType,
@@ -1349,6 +1387,7 @@ def scan_domain(
                 if not ns_ips:
                     _emit(f"  Could not resolve IP for nameserver {ns_host}", progress, messages)
                     continue
+                ns_host_errors: list[str] = []
                 for ns_ip in ns_ips:
                     auth_resolver = _make_resolver(ns_ip)
                     auth_findings, auth_errors = _query_records(
@@ -1369,8 +1408,25 @@ def scan_domain(
                     for item in auth_findings:
                         if item not in result.records:
                             result.records.append(item)
-                    for error in auth_errors:
-                        _emit(f"  Auth NS query error ({ns_host}): {error}", progress, messages)
+                    ns_host_errors.extend(auth_errors)
+                if ns_host_errors:
+                    summary = _summarize_auth_ns_query_errors(
+                        ns_host_errors,
+                        ns_host=ns_host,
+                        domain=domain,
+                        record_type_count=len(BASE_RECORD_TYPES),
+                    )
+                    _emit(f"  {summary}", progress, messages)
+                    result.records.append(
+                        DiscoveredRecord(
+                            fqdn=domain,
+                            record_type=None,
+                            value=summary,
+                            source_method="authoritative_nameserver",
+                            classification=FindingClassification.QUERY_ERROR,
+                            nameserver=ns_host,
+                        )
+                    )
 
     if not resolved_options.attempt_axfr:
         _emit(f"  AXFR skipped for {domain} (disabled in scan options)", progress, messages)

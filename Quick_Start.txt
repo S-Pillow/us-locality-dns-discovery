@@ -53,7 +53,7 @@ are not required.
    - Limited: generic/technical hostname or alias to known domain
    - Validation only: known domain confirmed in DNS (not a new discovery)
 
-10. Use Manual verification hint for optional dig commands.
+10. Use Verification guidance for optional independent dig checks.
 
 Important:
 * zone and second_level_domain are optional — workbook fields may be blank.

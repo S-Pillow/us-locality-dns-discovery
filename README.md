@@ -18,8 +18,8 @@ Internal-use **standalone Windows desktop utility** (Python 3.11+) for **unknown
 6. Click **Export Results** → **XLSX workbook (recommended)**.
 7. Open **Evidence Review** first (sorted Strong → Moderate → Limited → etc.).
 8. Read the **Why** column for plain-English context; use **How to Read** for definitions.
-8. Review `new_child_domains_found`, `evidence_value`, and `manual_verification_hint`.
-9. Manually verify a few strong/moderate rows before conclusions.
+8. Review `new_child_domains_found`, `evidence_value`, and **Verification guidance** (XLSX) / `manual_verification_hint` (CSV/JSON).
+9. Use optional dig commands from Verification guidance for independent confirmation when helpful.
 
 ## Current status (working prototype)
 
@@ -120,7 +120,7 @@ Use this workflow for coworker-ready visibility-gap evidence from a **small targ
 5. Export **XLSX** after the scan completes or is cancelled with partial results.
 6. Open the **Evidence Review** sheet first (rows are sorted strong → moderate → limited → inconclusive → none).
 7. Sort or filter by `evidence_support_level` if you need to re-prioritize within Summary.
-8. Manually verify a few **strong/moderate** rows using the `manual_verification_hint` dig commands.
+8. Review **Verification guidance** on strong/moderate rows for optional independent dig checks (`manual_verification_hint` in CSV/JSON).
 9. **Rerun inconclusive/error rows** before drawing conclusions.
 10. Word conclusions carefully:
     - The scan can support that DNS activity may exist outside registry/locality portal visibility.

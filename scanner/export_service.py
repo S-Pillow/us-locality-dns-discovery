@@ -63,8 +63,8 @@ OPERATOR_NOTE = (
 
 REVIEW_PATH_NOTE = (
     "Recommended review path: open Evidence Review first, focus on strong/moderate "
-    "evidence_value rows with new_child_domains_found, manually verify with dig hints, "
-    "and rerun inconclusive rows before conclusions."
+    "evidence_value rows with new_child_domains_found, use Verification guidance for "
+    "optional independent dig checks, and rerun inconclusive rows before conclusions."
 )
 
 EVIDENCE_VALUE_ORDER = {
@@ -78,23 +78,23 @@ EVIDENCE_VALUE_ORDER = {
 }
 
 RECOMMENDED_REVIEW_ACTIONS = {
-    "strong": "Strong example — manually verify delegated child zone",
-    "moderate": "Moderate example — review new organizational/service child name",
-    "limited": "Limited value — generic/technical hostname or base-zone context only",
-    "validation_only": "Known child validated in DNS — informational only",
-    "context_only": "Base zone context only — no new child names found",
+    "strong": "Tool found delegated child zone — review NS/SOA evidence",
+    "moderate": "Tool found new child DNS names — review organizational/service names",
+    "limited": "Tool found generic/technical hostnames — limited value",
+    "validation_only": "Tool confirmed known domains in DNS — informational only",
+    "context_only": "Tool found base zone context only — no new child names",
     "inconclusive": "Rerun before conclusion",
-    "none": "No new child domains found by tested methods",
+    "none": "Tool found no new child domains by tested methods",
 }
 
 DISPLAY_RECOMMENDED_REVIEW_ACTIONS = {
-    "strong": "Manually verify new delegated child zone",
-    "moderate": "Review new child domain name",
-    "limited": "Optional review — generic or technical hostname",
-    "validation_only": "Informational only — known domain confirmed in DNS",
-    "context_only": "No action needed — base zone context only",
+    "strong": "Tool found NS/SOA evidence for a new delegated child zone",
+    "moderate": "Tool found new child DNS names under this base domain",
+    "limited": "Tool found only generic or technical hostnames",
+    "validation_only": "Tool only confirmed domains already listed in the system input",
+    "context_only": "Tool found base zone context only — no new child names",
     "inconclusive": "Rerun scan before drawing conclusions",
-    "none": "No action needed",
+    "none": "Tool found no new child domains by tested methods",
 }
 
 GENERIC_HOSTNAME_LABELS = frozenset(
@@ -337,7 +337,7 @@ EVIDENCE_REVIEW_HEADER_LABELS = {
     "new_technical_hostnames_found": "New technical hostnames found",
     "known_domains_validated": "Known domains validated",
     "why": "Why",
-    "manual_verification_hint": "Manual verification hint",
+    "manual_verification_hint": "Verification guidance",
     "limitation_note": "Limitation note",
 }
 
@@ -370,7 +370,7 @@ SUMMARY_HEADER_LABELS = {
     "evidence_value": "Evidence value",
     "why": "Why",
     "recommended_review_action": "Recommended review action",
-    "manual_verification_hint": "Manual verification hint",
+    "manual_verification_hint": "Verification guidance",
     "scan_status": "Scan status",
     "authoritative_nameservers": "Authoritative nameservers",
     "axfr_status": "AXFR status",
@@ -709,39 +709,45 @@ def _why_for_domain_summary(
     scan_failed: bool,
 ) -> str:
     if scan_failed or evidence_value == "inconclusive":
-        return "Scan incomplete or errored; rerun before drawing conclusions."
+        return "Scan was incomplete or encountered errors. Rerun before drawing conclusions."
 
     new_count = int(comparison.get("new_child_domains_count", 0))
     new_delegated_count = int(comparison.get("new_delegated_domains_count", 0))
     validated_count = int(comparison.get("known_domains_validated_count", 0))
 
     if evidence_value == "strong" or new_delegated_count > 0:
-        return "New delegated child domain found in live DNS and not listed in the system input."
+        return (
+            "Tool found NS/SOA evidence for a new delegated child zone not listed "
+            "in the system input."
+        )
 
     if evidence_value == "moderate" and new_count > 0:
-        return "New child domain found in live DNS and not listed in the system input."
+        return "Tool found new child DNS names under this base domain not listed in the system input."
 
     if evidence_value == "limited" and new_count > 0:
         if new_delegated_count == 0 and validated_count > 0:
             return (
-                "New DNS alias/hostname found, but it points to a child domain already known "
-                "in the system."
+                "Tool found a DNS alias/hostname, but it points to a child domain already "
+                "known in the system."
             )
         return (
-            "New hostname found in live DNS, but it appears to be a generic or technical "
-            "service name."
+            "Tool found hostnames in live DNS, but they appear to be generic or technical "
+            "service names."
         )
 
     if evidence_value == "validation_only" or (validated_count > 0 and new_count == 0):
-        return "Only domains already listed in the system input were confirmed in DNS."
+        return "Tool only confirmed domains already listed in the system input."
 
     if evidence_value == "context_only":
-        return "Only base-domain DNS evidence was found; no child domains were discovered by tested methods."
+        return (
+            "Tool found only base-domain DNS evidence; no child domains were discovered "
+            "by tested methods."
+        )
 
     if evidence_value == "none":
-        return "No child domains were discovered by the selected methods."
+        return "Tool did not find child DNS names with the selected methods."
 
-    return "No child domains were discovered by the selected methods."
+    return "Tool did not find child DNS names with the selected methods."
 
 
 def _collect_dns_discovered_children(
@@ -1067,7 +1073,7 @@ def _analysis_note(
     comparison: dict[str, str | int | bool],
 ) -> str:
     if _domain_has_scan_error(domain_result):
-        return "Scan incomplete/error; rerun before drawing conclusions."
+        return "Scan was incomplete or encountered errors. Rerun before drawing conclusions."
 
     new_count = int(comparison.get("new_child_domains_count", 0))
     validated_count = int(comparison.get("known_domains_validated_count", 0))
@@ -1076,12 +1082,15 @@ def _analysis_note(
 
     if new_count > 0:
         return (
-            f"Live DNS testing found {new_count} child DNS name(s) not already listed "
+            f"Tool found {new_count} child DNS name(s) in live DNS not already listed "
             "in the system known-domain fields."
         )
 
     if validated_count > 0 and known_count > 0:
-        return "Known child domains from the system were validated in live DNS; no new child names found."
+        return (
+            "Tool confirmed known child domains from the system input in live DNS; "
+            "no new child names found."
+        )
 
     if known_count > 0 and validated_count == 0:
         return (
@@ -1089,12 +1098,18 @@ def _analysis_note(
         )
 
     if dns_discovered_base_only:
-        return "Base zone exists, but no child DNS names were discovered by tested methods."
+        return (
+            "Tool found base zone evidence, but no child DNS names were discovered "
+            "by tested methods."
+        )
 
     if scan_status == SCAN_STATUS_NO_RECORDS:
-        return "No child DNS names discovered using tested methods; this does not prove absence."
+        return (
+            "Tool did not find child DNS names with the selected methods; "
+            "this does not prove absence."
+        )
 
-    return "No new child domains found using tested methods."
+    return "Tool found no new child domains using tested methods."
 
 
 def _recommended_review_action(evidence_value: str) -> str:
@@ -1118,10 +1133,13 @@ def _manual_verification_hint(
     evidence_value: str,
 ) -> str:
     if evidence_value == "inconclusive" or _domain_has_scan_error(domain_result):
-        return "Rerun domain before drawing conclusions."
+        return "Scan was incomplete or encountered errors. Rerun before drawing conclusions."
 
     if evidence_value == "none":
-        return "No manual verification target from this scan."
+        return (
+            "Tool did not find child DNS names with the selected methods. "
+            "No manual check is suggested unless this domain is important."
+        )
 
     base = domain_result.domain
     per_name = comparison.get("_per_name", {})
@@ -1130,37 +1148,71 @@ def _manual_verification_hint(
 
     if evidence_value == "strong" and new_delegated:
         child = sorted(new_delegated)[0]
-        return f"Verify delegated child zone with: dig NS {child}; dig SOA {child}"
+        return (
+            f"Tool found NS/SOA evidence for {child}, indicating a delegated child zone. "
+            f"Optional manual check: dig NS {child}; dig SOA {child}"
+        )
 
     if evidence_value == "moderate" and new_children:
         for name in sorted(new_children):
             meta = per_name.get(name, {}) if isinstance(per_name, dict) else {}
             if meta.get("name_type") in {"organizational_child_name", "service_hostname"}:
-                return f"Verify new child domain with: dig A {name}; dig NS {name}"
+                return (
+                    f"Tool found DNS records for {name}. "
+                    f"Optional manual check: dig A {name}; dig NS {name}"
+                )
         child = sorted(new_children)[0]
-        return f"Verify new child domain with: dig A {child}; dig CNAME {child}"
+        return (
+            f"Tool found DNS records for {child}. "
+            f"Optional manual check: dig A {child}; dig CNAME {child}"
+        )
 
     if evidence_value == "limited" and new_children:
         for name in sorted(new_children):
             meta = per_name.get(name, {}) if isinstance(per_name, dict) else {}
+            if meta.get("name_type") == "alias_to_external_target":
+                return (
+                    "Tool found a CNAME target outside the scanned base domain. "
+                    "The external target is not counted as a child domain."
+                )
             if meta.get("name_type") in {"generic_hostname", "technical_vendor_hostname"}:
                 record_hint = "CNAME" if meta.get("name_type") == "technical_vendor_hostname" else "A"
-                return f"Verify hostname with: dig {record_hint} {name}"
+                return (
+                    f"Tool found DNS records for {name}, but it appears to be a generic "
+                    f"hostname. Optional manual check: dig {record_hint} {name}"
+                )
+            if meta.get("name_type") == "alias_to_known_domain":
+                return (
+                    f"Tool found DNS records for {name}, but it points to a child domain "
+                    f"already known in the system. Optional manual check: dig CNAME {name}"
+                )
         child = sorted(new_children)[0]
-        return f"Verify hostname with: dig A {child}"
+        return (
+            f"Tool found DNS records for {child}, but it appears to be a generic hostname. "
+            f"Optional manual check: dig A {child}"
+        )
 
     if evidence_value == "validation_only":
         validated = comparison.get("known_domains_validated", "")
         if validated:
             first = str(validated).split(";")[0].strip()
             if first:
-                return f"Known domain validated in DNS. Optional check: dig A {first}"
-        return "Known child domain validated in DNS."
+                return (
+                    f"Tool confirmed a domain already listed in the system input. "
+                    f"Optional manual check: dig NS {first}; dig A {first}"
+                )
+        return "Tool confirmed domains already listed in the system input."
 
     if evidence_value == "context_only" or counts["base_zone_exists_flag"]:
-        return f"Verify base zone with: dig SOA {base}; dig NS {base}"
+        return (
+            f"Tool found base zone DNS evidence for {base}. "
+            f"Optional manual check: dig SOA {base}; dig NS {base}"
+        )
 
-    return "No manual verification target from this scan."
+    return (
+        "Tool did not find child DNS names with the selected methods. "
+        "No manual check is suggested unless this domain is important."
+    )
 
 
 def _finding_child_metadata(
@@ -2189,7 +2241,7 @@ def build_how_to_read_rows() -> list[tuple[str, str]]:
         (
             "Suggested review path",
             "Open Evidence Review first. Focus on Strong and Moderate rows for coworker review. "
-            "Read Why for context. Use Manual verification hint for optional dig commands.",
+            "Read Why for context. Use Verification guidance for optional independent dig checks.",
         ),
     ]
 
