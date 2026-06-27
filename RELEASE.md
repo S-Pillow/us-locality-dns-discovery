@@ -62,8 +62,9 @@ committed.
 ## Release workflow (local desktop model)
 
 1. Accept source on a stable local branch (for example `main` when created).
-2. Update `scanner/version.py` (`APP_VERSION`, `SOURCE_COMMIT`) to match the
-   accepted commit.
+2. Update `scanner/version.py` (`APP_VERSION`) to reflect the accepted release
+   version. **Do not update `SOURCE_COMMIT` manually** — it is now derived at
+   runtime (see Version metadata below).
 3. Run durable regression tests from `tests/regression/`.
 4. Rebuild EXE with `build_exe.bat`.
 5. **Verify the rebuilt EXE** — packaged mode behaves differently from
@@ -80,17 +81,23 @@ Source-controlled fields live in `scanner/version.py`:
 - `APP_VERSION` — human-readable build label (for example `0.24.0-source`)
 - `EVIDENCE_MODEL_VERSION` — evidence workbook model identifier
 - `SOURCE_BUILD_LABEL` — `source` or future packaged label
-- `SOURCE_COMMIT` — manual Git commit reference for traceability
+- `SOURCE_COMMIT` — static fallback value used only by packaging tickets that
+  inject a commit hash at build time; **not used for source-mode reporting**
 
 Reports include `app_version`, `source_build_label`, and `source_commit` in
-Scan Settings when exported.
+Scan Settings (XLSX), in JSON `scan_metadata`, and in the summary CSV when
+exported.
+
+In **source mode**, `source_commit` is derived at runtime by calling
+`get_source_commit()` (added Ticket 31), which runs `git rev-parse --short HEAD`
+and returns the live HEAD hash. If git is unavailable (packaged EXE, no git
+binary, or outside a repository), the value falls back to `"unstamped"`.
+Packaged-build commit stamping is a packaging-ticket concern and handled
+separately from source-mode reporting.
 
 JSON scan reports include structured `evidence_trace` arrays on findings and
 `evidence_diagnostics` entries for auditability. CSV/XLSX workbooks remain
 summary-oriented; use JSON for full raw DNS evidence trace.
-
-Update `SOURCE_COMMIT` manually when preparing a release; runtime Git queries
-are intentionally not used.
 
 ## Packaged verification expectations
 
