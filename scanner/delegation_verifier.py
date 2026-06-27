@@ -18,7 +18,14 @@ import dns.message
 import dns.rdatatype
 
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
-from scanner.models import DiscoveredRecord, FindingClassification, RecordType
+from scanner.models import (
+    DiscoveredRecord,
+    EvidenceOutcome,
+    EvidenceStatus,
+    FindingClassification,
+    RecordType,
+)
+from scanner.evidence_status import outcome_ignored_unrelated_authority
 
 SendQueryFn = Callable[
     [str, RecordType, object],
@@ -64,6 +71,7 @@ class DelegationVerificationResult:
     records: list[DiscoveredRecord] = field(default_factory=list)
     log_message: str = ""
     errors: list[str] = field(default_factory=list)
+    evidence_outcomes: list[EvidenceOutcome] = field(default_factory=list)
 
 
 def _collect_candidate_ns(
@@ -140,6 +148,7 @@ def _records_from_parent_side_ns(
                 confidence="high",
                 nameserver=nameserver,
                 ttl=ttl,
+                evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
             )
         )
     return records
@@ -169,6 +178,7 @@ def _record_from_apex_soa(
                 confidence="high",
                 nameserver=nameserver,
                 ttl=rrset.ttl,
+                evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
             )
     return None
 
@@ -228,6 +238,7 @@ def verify_delegated_child_zone(
     candidate_norm = _norm_name(candidate)
     parent = _parent_domain(candidate_norm)
     errors: list[str] = []
+    evidence_outcomes: list[EvidenceOutcome] = []
     last_log = ""
 
     if not parent:
@@ -242,6 +253,7 @@ def verify_delegated_child_zone(
             matched_owner=None,
             source_path="unknown",
             log_message=msg,
+            evidence_outcomes=evidence_outcomes,
         )
 
     hosts = list(parent_ns_hosts or [])
@@ -288,10 +300,19 @@ def verify_delegated_child_zone(
                     records=records,
                     log_message=log_msg,
                     errors=errors,
+                    evidence_outcomes=evidence_outcomes,
                 )
 
             if reason:
                 last_log = reason
+                if rc == DNSResponseClass.UNRELATED_AUTHORITY:
+                    evidence_outcomes.append(
+                        outcome_ignored_unrelated_authority(
+                            candidate_norm,
+                            source_method=source_method,
+                            detail=reason,
+                        )
+                    )
 
     # --- Path 2: candidate-apex authoritative NS / SOA ----------------------
     child_ns_targets = list(dict.fromkeys(child_ns_targets + list(delegation_child_ns_hosts or [])))
@@ -327,9 +348,18 @@ def verify_delegated_child_zone(
                     records=records,
                     log_message=log_msg,
                     errors=errors,
+                    evidence_outcomes=evidence_outcomes,
                 )
             if ns_reason:
                 last_log = ns_reason
+                if ns_rc == DNSResponseClass.UNRELATED_AUTHORITY:
+                    evidence_outcomes.append(
+                        outcome_ignored_unrelated_authority(
+                            candidate_norm,
+                            source_method=source_method,
+                            detail=ns_reason,
+                        )
+                    )
 
             # SOA at candidate apex (zone/apex evidence, not delegated_child_zone)
             soa_response, soa_error = send_query(candidate_norm, RecordType.SOA, resolver)
@@ -357,6 +387,7 @@ def verify_delegated_child_zone(
                         records=[soa_record],
                         log_message=log_msg,
                         errors=errors,
+                        evidence_outcomes=evidence_outcomes,
                     )
             if is_no_finding_class(soa_rc):
                 last_log = _delegation_log_not_verified(candidate_norm, soa_rc)
@@ -368,6 +399,13 @@ def verify_delegated_child_zone(
                     else "unrelated authority SOA"
                 )
                 last_log = _delegation_log_ignored_signal(candidate_norm, detail)
+                evidence_outcomes.append(
+                    outcome_ignored_unrelated_authority(
+                        candidate_norm,
+                        source_method=source_method,
+                        detail=last_log,
+                    )
+                )
 
     if last_log:
         if log_sink is not None:
@@ -381,6 +419,7 @@ def verify_delegated_child_zone(
             source_path="unknown",
             log_message=last_log,
             errors=errors,
+            evidence_outcomes=evidence_outcomes,
         )
 
     msg = f"Delegation not verified for {candidate_norm}: no authoritative verification path"
@@ -395,4 +434,5 @@ def verify_delegated_child_zone(
         source_path="unknown",
         log_message=msg,
         errors=errors,
+        evidence_outcomes=evidence_outcomes,
     )

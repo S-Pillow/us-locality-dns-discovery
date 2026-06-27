@@ -169,16 +169,18 @@ def _run_gated(
 def _usable_child_names(result: DomainScanResult, base: str) -> set[str]:
     scan_result = _mock_scan_result(result)
     rows = build_csv_rows(scan_result)
-    return {
-        row["discovered_name"]
-        for row in rows
-        if row["discovered_name"] != base
-        and row.get("finding_type")
-        not in {
+    names: set[str] = set()
+    for row in rows:
+        if row["discovered_name"] == base:
+            continue
+        finding_type = row.get("finding_type", "")
+        if not finding_type or finding_type in {
             FindingClassification.QUERY_ERROR.value,
             FindingClassification.SCAN_ERROR.value,
-        }
-    }
+        }:
+            continue
+        names.add(row["discovered_name"])
+    return names
 
 
 def test_scenario_a_parent_fails_children_skipped() -> None:

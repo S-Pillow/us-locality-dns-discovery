@@ -25,10 +25,13 @@ from scanner.version import (
 )
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.input_loader import PREFERRED_INPUT_FORMAT_NOTE, RECOMMENDED_INPUT_COLUMNS_CSV
+from scanner.evidence_status import resolve_evidence_status
 from scanner.models import (
     DiscoveredRecord,
     DomainInputRecord,
     DomainScanResult,
+    EvidenceOutcome,
+    EvidenceStatus,
     FindingClassification,
     RecordType,
     ScanRunResult,
@@ -224,6 +227,7 @@ CSV_COLUMNS = [
     "tested_name",
     "record_type",
     "finding_type",
+    "evidence_status",
     "confidence",
     "source",
     "nameserver",
@@ -403,6 +407,7 @@ FINDINGS_XLSX_COLUMN_KEYS = [
     "tested_name",
     "record_type",
     "finding_type",
+    "evidence_status",
     "confidence",
     "source",
     "nameserver",
@@ -427,6 +432,7 @@ FINDINGS_HEADER_LABELS = {
     "tested_name": "Tested name",
     "record_type": "Record type",
     "finding_type": "Finding type",
+    "evidence_status": "Evidence status",
     "confidence": "Confidence",
     "source": "Source",
     "nameserver": "Nameserver",
@@ -1518,6 +1524,64 @@ def _include_record_in_export(record: DiscoveredRecord, base_domain: str) -> boo
     return True
 
 
+def _diagnostic_export_metadata(
+    fqdn: str,
+    *,
+    detail: str,
+) -> dict[str, str]:
+    return {
+        "discovered_name": "",
+        "known_domain": "no",
+        "name_type": "diagnostic",
+        "evidence_value": "context_only",
+        "why": detail or "Diagnostic evidence status only; not a confirmed finding",
+    }
+
+
+def _evidence_outcome_row(
+    domain_result: DomainScanResult,
+    outcome: EvidenceOutcome,
+    *,
+    scan_timestamp: str,
+    wordlist_sources: str,
+    axfr_status: str,
+    wildcard: str,
+    notes: str,
+) -> dict[str, str]:
+    meta = _diagnostic_export_metadata(outcome.fqdn, detail=outcome.detail)
+    return {
+        "scan_timestamp": scan_timestamp,
+        "base_domain": domain_result.domain,
+        **meta,
+        "tested_name": outcome.fqdn,
+        "record_type": "",
+        "finding_type": "",
+        "evidence_status": outcome.evidence_status.value,
+        "confidence": "unknown",
+        "source": _map_source_method(outcome.source_method),
+        "nameserver": "",
+        "value": "",
+        "ttl": "",
+        "wildcard_suspected": wildcard,
+        "axfr_status": axfr_status,
+        "error": outcome.detail if outcome.evidence_status == EvidenceStatus.INCONCLUSIVE_DNS_FAILURE else "",
+        "wordlist_sources": wordlist_sources,
+        "notes": notes,
+    }
+
+
+def _map_source_method(source_method: str) -> str:
+    mapping = {
+        "recursive_resolver": "recursive",
+        "authoritative_nameserver": "authoritative",
+        "axfr": "axfr",
+        "wildcard_probe": "wildcard_probe",
+        "generated_candidate": "generated_candidate",
+        "fifth_level_parent_validation": "5th-level parent check",
+    }
+    return mapping.get(source_method, source_method)
+
+
 def _record_type_text(record: DiscoveredRecord) -> str:
     if record.classification == FindingClassification.AXFR_SUCCESS and record.record_type is None:
         return "AXFR"
@@ -1730,6 +1794,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "tested_name": domain_result.domain,
                     "record_type": "",
                     "finding_type": FindingClassification.NO_RECORDS_DISCOVERED.value,
+                    "evidence_status": EvidenceStatus.NOT_RECORDED.value,
                     "confidence": "unknown",
                     "source": "recursive",
                     "nameserver": "",
@@ -1746,6 +1811,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
         for record in domain_result.records:
             if not _include_record_in_export(record, domain_result.domain):
                 continue
+            status = resolve_evidence_status(record, domain_result.domain)
             child_meta = _finding_child_metadata(
                 domain_result,
                 record.fqdn,
@@ -1761,6 +1827,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "tested_name": record.fqdn,
                     "record_type": _record_type_text(record),
                     "finding_type": record.classification.value,
+                    "evidence_status": status.value,
                     "confidence": _map_confidence(record.confidence),
                     "source": _map_source(record),
                     "nameserver": record.nameserver or "",
@@ -1772,6 +1839,19 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "wordlist_sources": wordlist_sources,
                     "notes": _finding_notes(record, notes),
                 }
+            )
+
+        for outcome in domain_result.evidence_outcomes:
+            rows.append(
+                _evidence_outcome_row(
+                    domain_result,
+                    outcome,
+                    scan_timestamp=scan_timestamp,
+                    wordlist_sources=wordlist_sources,
+                    axfr_status=axfr_status,
+                    wildcard=wildcard,
+                    notes=notes,
+                )
             )
 
     return rows
@@ -2105,6 +2185,7 @@ def _finding_to_dict(
             "tested_name": record.fqdn,
             "record_type": None,
             "finding_type": record.classification.value,
+            "evidence_status": resolve_evidence_status(record, base_domain).value,
             "confidence": _map_confidence(record.confidence),
             "source": _map_source(record),
             "nameserver": record.nameserver,
@@ -2117,6 +2198,7 @@ def _finding_to_dict(
         "tested_name": record.fqdn,
         "record_type": _record_type_text(record) or None,
         "finding_type": record.classification.value,
+        "evidence_status": resolve_evidence_status(record, base_domain).value,
         "confidence": _map_confidence(record.confidence),
         "source": _map_source(record),
         "nameserver": record.nameserver,
@@ -2167,6 +2249,7 @@ def build_json_document(result: ScanRunResult) -> dict:
                     "tested_name": domain_result.domain,
                     "record_type": None,
                     "finding_type": FindingClassification.NO_RECORDS_DISCOVERED.value,
+                    "evidence_status": EvidenceStatus.NOT_RECORDED.value,
                     "confidence": "unknown",
                     "source": "recursive",
                     "nameserver": None,
@@ -2176,6 +2259,7 @@ def build_json_document(result: ScanRunResult) -> dict:
                 }
             )
 
+        evidence_diagnostics: list[dict] = []
         for record in domain_result.records:
             if record.classification in {
                 FindingClassification.QUERY_ERROR,
@@ -2187,6 +2271,16 @@ def build_json_document(result: ScanRunResult) -> dict:
             item = _finding_to_dict(record, domain_result.domain, include_errors=False)
             if item:
                 findings.append(item)
+
+        for outcome in domain_result.evidence_outcomes:
+            evidence_diagnostics.append(
+                {
+                    "tested_name": outcome.fqdn,
+                    "evidence_status": outcome.evidence_status.value,
+                    "source": _map_source_method(outcome.source_method),
+                    "detail": outcome.detail,
+                }
+            )
 
         comparison = _compare_known_vs_discovered(domain_result)
         scan_status = _determine_scan_status(domain_result, counts)
@@ -2224,6 +2318,7 @@ def build_json_document(result: ScanRunResult) -> dict:
                 "axfr_status": _domain_axfr_status(domain_result, axfr_enabled),
                 "scan_status": _determine_scan_status(domain_result, counts),
                 "findings": findings,
+                "evidence_diagnostics": evidence_diagnostics,
                 "summary_counts": counts,
                 "errors": errors,
                 "notes": domain_result.notes + [DISCOVERY_LIMITATION],

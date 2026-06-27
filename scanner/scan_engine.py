@@ -22,6 +22,13 @@ import dns.zone
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response
+from scanner.evidence_status import (
+    outcome_candidate_tested,
+    outcome_ignored_unrelated_authority,
+    outcome_inconclusive_dns_failure,
+    outcome_skipped_by_parent_gating,
+    stamp_record_evidence_status,
+)
 from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.models import (
     CancellationToken,
@@ -29,6 +36,8 @@ from scanner.models import (
     DomainInputRecord,
     DomainLoadInfo,
     DomainScanResult,
+    EvidenceOutcome,
+    EvidenceStatus,
     FindingClassification,
     PreflightSummary,
     ProgressCallback,
@@ -694,6 +703,7 @@ def _validate_fourth_level_parent(
         classification=FindingClassification.STANDARD_RECORD,
         base_domain=domain,
         log_sink=messages,
+        evidence_outcomes=result.evidence_outcomes,
     )
     for item in other_findings:
         item.confidence = _confidence_for(
@@ -710,6 +720,7 @@ def _validate_fourth_level_parent(
                 value=error,
                 source_method=FIFTH_LEVEL_PARENT_SOURCE,
                 classification=FindingClassification.QUERY_ERROR,
+                evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
             )
         )
 
@@ -978,6 +989,7 @@ def _query_records(
     confidence: str = "normal",
     base_domain: str | None = None,
     log_sink: list[str] | None = None,
+    evidence_outcomes: list[EvidenceOutcome] | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
     """Query *fqdn* for each of *record_types*; return findings and error strings.
 
@@ -1028,6 +1040,14 @@ def _query_records(
                 log_sink.append(
                     f"Ignored unrelated authority data while checking {fqdn} ({record_type.value})"
                 )
+            if evidence_outcomes is not None:
+                evidence_outcomes.append(
+                    outcome_ignored_unrelated_authority(
+                        fqdn,
+                        source_method=source_method,
+                        detail=f"Unrelated authority while checking {record_type.value}",
+                    )
+                )
             continue
 
         if rc == DNSResponseClass.NODATA_EMPTY_ANSWER:
@@ -1061,6 +1081,8 @@ def _query_records(
             continue
         seen.add(key)
         deduped.append(item)
+    for item in deduped:
+        stamp_record_evidence_status(item, zone_base)
     return deduped, errors
 
 
@@ -1339,6 +1361,9 @@ def _test_candidates(
                     if parent_key in parent_failed:
                         skipped_fifth += 1
                         parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
+                        result.evidence_outcomes.append(
+                            outcome_skipped_by_parent_gating(candidate, parent_key)
+                        )
                         continue
 
                     if parent_key not in parent_passed:
@@ -1357,6 +1382,9 @@ def _test_candidates(
                             parent_failed.add(parent_key)
                             skipped_fifth += 1
                             parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
+                            result.evidence_outcomes.append(
+                                outcome_skipped_by_parent_gating(candidate, parent_key)
+                            )
                             continue
 
             delegation = verify_delegated_child_zone(
@@ -1369,6 +1397,7 @@ def _test_candidates(
                 source_method="generated_candidate",
                 log_sink=messages,
             )
+            result.evidence_outcomes.extend(delegation.evidence_outcomes)
             ns_findings = [
                 item
                 for item in delegation.records
@@ -1401,17 +1430,34 @@ def _test_candidates(
                 classification=FindingClassification.STANDARD_RECORD,
                 base_domain=domain,
                 log_sink=messages,
+                evidence_outcomes=result.evidence_outcomes,
             )
+            findings_added = 0
             for item in other_findings:
                 item.confidence = _confidence_for(
                     wildcard_suspected, item.record_type, item.classification
                 )
                 candidate_record_count += 1
+                findings_added += 1
                 result.records.append(item)
+            for item in delegation.records:
+                if item.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+                    findings_added += 1
+                elif item.classification == FindingClassification.ZONE_SOA_DISCOVERED:
+                    findings_added += 1
 
             tested = candidate_index
 
-            for error in ns_candidate_errors + candidate_errors:
+            candidate_errors_combined = ns_candidate_errors + candidate_errors
+            if candidate_errors_combined:
+                result.evidence_outcomes.append(
+                    outcome_inconclusive_dns_failure(
+                        candidate,
+                        source_method="generated_candidate",
+                        detail=candidate_errors_combined[0],
+                    )
+                )
+            for error in candidate_errors_combined:
                 result.records.append(
                     DiscoveredRecord(
                         fqdn=candidate,
@@ -1419,7 +1465,16 @@ def _test_candidates(
                         value=error,
                         source_method="recursive_resolver",
                         classification=FindingClassification.QUERY_ERROR,
+                        evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
                     )
+                )
+            if (
+                not ns_findings
+                and not findings_added
+                and not candidate_errors_combined
+            ):
+                result.evidence_outcomes.append(
+                    outcome_candidate_tested(candidate, source_method="generated_candidate")
                 )
 
     for parent_key, count in parent_skip_counts.items():
@@ -1501,6 +1556,7 @@ def scan_domain(
             classification=FindingClassification.BASE_DOMAIN_RECORD,
             base_domain=domain,
             log_sink=messages,
+            evidence_outcomes=result.evidence_outcomes,
         )
         result.records.extend(base_findings)
 
@@ -1545,6 +1601,7 @@ def scan_domain(
                     value=error,
                     source_method="recursive_resolver",
                     classification=FindingClassification.QUERY_ERROR,
+                    evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
                 )
             )
 
@@ -1635,6 +1692,7 @@ def scan_domain(
                         nameserver=f"{ns_host} ({ns_ip})",
                         base_domain=domain,
                         log_sink=messages,
+                        evidence_outcomes=result.evidence_outcomes,
                     )
                     if auth_findings:
                         _emit(
@@ -1662,6 +1720,7 @@ def scan_domain(
                             source_method="authoritative_nameserver",
                             classification=FindingClassification.QUERY_ERROR,
                             nameserver=ns_host,
+                            evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
                         )
                     )
 

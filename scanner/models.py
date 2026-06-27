@@ -156,6 +156,34 @@ class RecordType(str, Enum):
     CAA = "CAA"
 
 
+class EvidenceStatus(str, Enum):
+    """Structured evidence outcome for tested names and DNS findings.
+
+    Confirmed statuses require an approved evidence path.  Diagnostic statuses
+    (skipped, inconclusive, ignored, candidate-only) must not be treated as
+    discovered domains in reports.
+    """
+
+    CANDIDATE_TESTED = "CANDIDATE_TESTED"
+    CONFIRMED_ORDINARY_DNS_NAME = "CONFIRMED_ORDINARY_DNS_NAME"
+    CONFIRMED_DELEGATED_CHILD_ZONE = "CONFIRMED_DELEGATED_CHILD_ZONE"
+    KNOWN_DOMAIN_VALIDATED = "KNOWN_DOMAIN_VALIDATED"
+    SKIPPED_BY_PARENT_GATING = "SKIPPED_BY_PARENT_GATING"
+    INCONCLUSIVE_DNS_FAILURE = "INCONCLUSIVE_DNS_FAILURE"
+    IGNORED_UNRELATED_AUTHORITY = "IGNORED_UNRELATED_AUTHORITY"
+    NOT_RECORDED = "NOT_RECORDED"
+
+
+@dataclass
+class EvidenceOutcome:
+    """Non-finding or diagnostic evidence status for a tested name."""
+
+    fqdn: str
+    evidence_status: EvidenceStatus
+    source_method: str
+    detail: str = ""
+
+
 class FindingClassification(str, Enum):
     """How a discovery finding should be interpreted in reports."""
 
@@ -226,6 +254,7 @@ class DiscoveredRecord:
     confidence: str = "normal"
     nameserver: Optional[str] = None
     ttl: Optional[int] = None
+    evidence_status: EvidenceStatus | None = None
 
 
 @dataclass
@@ -234,6 +263,7 @@ class DomainScanResult:
 
     domain: str
     records: list[DiscoveredRecord] = field(default_factory=list)
+    evidence_outcomes: list[EvidenceOutcome] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     wildcard_suspected: bool = False
     candidates_tested: int = 0
