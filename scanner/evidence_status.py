@@ -25,6 +25,9 @@ _DIAGNOSTIC_EVIDENCE_STATUSES = frozenset(
         EvidenceStatus.SKIPPED_BY_PARENT_GATING,
         EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
         EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+        # Wildcard attestation diagnostics (R4a)
+        EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
+        EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
     }
 )
 
@@ -153,4 +156,40 @@ def outcome_candidate_tested(fqdn: str, *, source_method: str) -> EvidenceOutcom
         evidence_status=EvidenceStatus.CANDIDATE_TESTED,
         source_method=source_method,
         detail="Candidate tested; no confirmed DNS evidence",
+    )
+
+
+def outcome_suppressed_wildcard_match(
+    fqdn: str,
+    *,
+    parent: str,
+    source_method: str = "generated_candidate",
+) -> EvidenceOutcome:
+    """Candidate response matches the wildcard signature at *parent* — suppressed (§5)."""
+    from scanner.wildcard_attestation import WildcardAttestationStatus  # noqa: PLC0415
+
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
+        source_method=source_method,
+        detail=f"Response matches wildcard signature at parent {parent}; suppressed to diagnostic",
+        attestation_status=WildcardAttestationStatus.DETECTED.value,
+    )
+
+
+def outcome_withheld_wildcard_inconclusive(
+    fqdn: str,
+    *,
+    parent: str,
+    source_method: str = "generated_candidate",
+) -> EvidenceOutcome:
+    """Wildcard attestation was inconclusive at *parent*; promotion withheld (§3)."""
+    from scanner.wildcard_attestation import WildcardAttestationStatus  # noqa: PLC0415
+
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        source_method=source_method,
+        detail=f"Wildcard attestation inconclusive at parent {parent}; promotion withheld",
+        attestation_status=WildcardAttestationStatus.INCONCLUSIVE.value,
     )

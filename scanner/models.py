@@ -172,6 +172,11 @@ class EvidenceStatus(str, Enum):
     INCONCLUSIVE_DNS_FAILURE = "INCONCLUSIVE_DNS_FAILURE"
     IGNORED_UNRELATED_AUTHORITY = "IGNORED_UNRELATED_AUTHORITY"
     NOT_RECORDED = "NOT_RECORDED"
+    # Wildcard attestation outcomes (R4a)
+    SUPPRESSED_WILDCARD_MATCH = "SUPPRESSED_WILDCARD_MATCH"
+    """Candidate response matches the parent's wildcard signature; suppressed to diagnostic."""
+    WITHHELD_WILDCARD_INCONCLUSIVE = "WITHHELD_WILDCARD_INCONCLUSIVE"
+    """Wildcard attestation at parent was inconclusive; promotion withheld in Light mode."""
 
 
 @dataclass
@@ -206,6 +211,8 @@ class EvidenceOutcome:
     source_method: str
     detail: str = ""
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
+    # Per-parent wildcard attestation status attached at testing time (R4a).
+    attestation_status: str | None = None
 
 
 class ParentGatingConfidence(str, Enum):
@@ -305,6 +312,15 @@ class DiscoveredRecord:
     ttl: Optional[int] = None
     evidence_status: EvidenceStatus | None = None
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
+    # Per-parent wildcard attestation fields (R4a).  R4b surfaces these in exports.
+    attestation_status: str | None = None
+    wildcard_signature_matched: bool | None = None
+    """False when the candidate differentiated from the wildcard; None when no
+    wildcard was detected or the field has not been evaluated."""
+    wildcard_differentiation_reason: str | None = None
+    """Named differentiation reason (distinct_rrtype | distinct_answer |
+    distinct_cname_target | candidate_ns_soa | verified_delegation) when the
+    candidate promoted despite a DETECTED wildcard at its enumeration parent."""
 
 
 @dataclass
