@@ -29,6 +29,8 @@ python tests/regression/test_ticket24_delegation_verification.py
 ```
 
 See `tests/regression/README.md` for the full list. Tests use mocked DNS only.
+Source acceptance runs durable scripts under `tests/regression/`; gitignored
+`output/_ticket*.py` legacy wrappers are optional and not part of the chain.
 
 ## Output folder policy
 

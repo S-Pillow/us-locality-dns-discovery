@@ -85,6 +85,16 @@ def _norm_name(name: str) -> str:
     return name.strip().lower().rstrip(".")
 
 
+def _is_timeout_transport_error(transport_error: str) -> bool:
+    """Return True when *transport_error* text indicates a DNS query timeout."""
+    lowered = transport_error.lower()
+    return (
+        "timeout" in lowered
+        or "timed out" in lowered
+        or "timed-out" in lowered
+    )
+
+
 def classify_dns_response(
     response: dns.message.Message | None,
     qname: str,
@@ -107,7 +117,7 @@ def classify_dns_response(
     """
     # --- Transport-level failures -----------------------------------------
     if transport_error is not None:
-        if "timeout" in transport_error.lower():
+        if _is_timeout_transport_error(transport_error):
             return DNSResponseClass.TIMEOUT
         return DNSResponseClass.MALFORMED_OR_UNUSABLE
 

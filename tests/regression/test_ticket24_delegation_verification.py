@@ -6,7 +6,6 @@ All DNS interactions are synthetic (mocked); no live network calls occur.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +22,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
+from tests.regression._chain import run_durable_regression
+from tests.regression._paths import REGRESSION_DIR, REPO_ROOT
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.export_service import build_csv_rows
@@ -520,18 +520,6 @@ def test_log_shape_verified_and_ignored() -> None:
 # Regression chain
 # ---------------------------------------------------------------------------
 
-def _run_regression(script: Path) -> None:
-    proc = subprocess.run(
-        [sys.executable, str(script)],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-    )
-    if proc.returncode != 0:
-        print(f"REGRESSION FAIL: {script.name}\n{proc.stdout}\n{proc.stderr}")
-        sys.exit(1)
-    print(f"  regression: {script.name} passed")
-
 
 def main() -> None:
     print("=== Ticket 24: Delegation Verification Mode ===\n")
@@ -561,7 +549,7 @@ def main() -> None:
     test_log_shape_verified_and_ignored()
 
     print("\n-- Prior regression chain --")
-    _run_regression(REGRESSION_DIR / "test_ticket23_dns_classifier.py")
+    run_durable_regression(REGRESSION_DIR / "test_ticket23_dns_classifier.py")
 
     print("\n=== Ticket 24 verification PASSED ===")
 

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -21,7 +20,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
+from tests.regression._paths import REGRESSION_DIR, REPO_ROOT
 
 from scanner.export_service import build_csv_rows, build_summary_rows
 from scanner.models import (
@@ -356,15 +355,6 @@ def test_scenario_f_ticket20_unrelated_authority() -> None:
     print("scenario F Ticket 20 unrelated authority still rejected: OK")
 
 
-def _run_regression(script_name: str) -> None:
-    script = LEGACY_OUTPUT_DIR / script_name
-    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        print(proc.stdout)
-        print(proc.stderr)
-        raise AssertionError(f"{script_name} failed")
-
-
 def main() -> None:
     test_scenario_a_parent_fails_children_skipped()
     test_scenario_b_parent_validates_child_fails()
@@ -372,17 +362,6 @@ def main() -> None:
     test_scenario_d_unknown_parent_validates_child_validates()
     test_scenario_e_parent_fail_cache_dedup()
     test_scenario_f_ticket20_unrelated_authority()
-    for script in (
-        "_ticket13_verify.py",
-        "_ticket15_verify.py",
-        "_ticket16_verify.py",
-        "_ticket17_verify.py",
-        "_ticket19_verify.py",
-        "_ticket20_verify.py",
-        "_ticket21_verify.py",
-    ):
-        _run_regression(script)
-        print(f"{script}: OK")
     print("\nTicket 22 verification passed.")
 
 

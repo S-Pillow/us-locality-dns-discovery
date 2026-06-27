@@ -9,7 +9,6 @@ All DNS interactions are synthetic (mocked); no live network calls occur.
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +26,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
+from tests.regression._chain import run_durable_regression
+from tests.regression._paths import REGRESSION_DIR, REPO_ROOT
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
@@ -184,6 +184,22 @@ def test_classify_timeout() -> None:
     rc = classify_dns_response(None, "mail.ci.ma.us", transport_error="mail.ci.ma.us NS: timeout via 1.1.1.1")
     assert rc == DNSResponseClass.TIMEOUT, f"expected TIMEOUT, got {rc}"
     print("classify TIMEOUT: OK")
+
+
+def test_classify_timeout_variants() -> None:
+    """Timeout-like transport errors classify as TIMEOUT (case-insensitive)."""
+    cases = (
+        "timed out",
+        "TIMED OUT",
+        "operation timed out",
+        "query timed out",
+        "DNS query timed-out",
+        "example.com A: Timeout via 8.8.8.8",
+    )
+    for message in cases:
+        rc = classify_dns_response(None, "mail.ci.ma.us", transport_error=message)
+        assert rc == DNSResponseClass.TIMEOUT, f"expected TIMEOUT for {message!r}, got {rc}"
+    print("classify TIMEOUT variants: OK")
 
 
 def test_classify_negative_nxdomain() -> None:
@@ -848,20 +864,6 @@ def test_known_good_log_diagnostic_for_unrelated_authority() -> None:
 # Section 6: Run prior regression chain
 # ---------------------------------------------------------------------------
 
-def _run_regression(script_path: Path) -> None:
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        capture_output=True,
-        text=True,
-        cwd=REPO_ROOT,
-    )
-    output = result.stdout + result.stderr
-    if result.returncode != 0:
-        print(f"REGRESSION FAIL: {script_path.name}\n{output}")
-        sys.exit(1)
-    print(f"  Regression chain: {script_path.name} passed")
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -875,6 +877,7 @@ def main() -> None:
     test_classify_unrelated_authority_com_ns()
     test_classify_servfail()
     test_classify_timeout()
+    test_classify_timeout_variants()
     test_classify_negative_nxdomain()
     test_classify_nodata_empty_answer()
     test_classify_owner_matching_answer_a()
@@ -916,7 +919,7 @@ def main() -> None:
     test_known_good_log_diagnostic_for_unrelated_authority()
 
     print("\n-- Section 6: Prior regression chain --")
-    _run_regression(REGRESSION_DIR / "test_ticket22_parent_gating.py")
+    run_durable_regression(REGRESSION_DIR / "test_ticket22_parent_gating.py")
 
     print("\n=== Ticket 23 verification PASSED ===")
 

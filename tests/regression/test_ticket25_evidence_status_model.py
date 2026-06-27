@@ -7,7 +7,6 @@ All DNS interactions are synthetic (mocked); no live network calls occur.
 from __future__ import annotations
 
 import json
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,7 +23,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
+from tests.regression._chain import run_durable_regression
+from tests.regression._paths import REGRESSION_DIR, REPO_ROOT
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.evidence_status import (
@@ -577,7 +577,7 @@ def test_export_inconclusive_not_confirmed() -> None:
 def _run_ticket24_regression() -> None:
     script = REGRESSION_DIR / "test_ticket24_delegation_verification.py"
     print(f"\n--- Chaining Ticket 24 regression: {script.name} ---")
-    subprocess.run([sys.executable, str(script)], check=True, cwd=str(REPO_ROOT))
+    run_durable_regression(script)
 
 
 def main() -> None:
