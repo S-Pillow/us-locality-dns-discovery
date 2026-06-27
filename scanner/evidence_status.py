@@ -6,6 +6,7 @@ from scanner.models import (
     DiscoveredRecord,
     EvidenceOutcome,
     EvidenceStatus,
+    EvidenceTrace,
     FindingClassification,
 )
 
@@ -99,12 +100,18 @@ def evidence_status_export_value(
     return resolve_evidence_status(record, base_domain).value
 
 
-def outcome_skipped_by_parent_gating(fqdn: str, parent: str) -> EvidenceOutcome:
+def outcome_skipped_by_parent_gating(
+    fqdn: str,
+    parent: str,
+    *,
+    evidence_trace: list[EvidenceTrace] | None = None,
+) -> EvidenceOutcome:
     return EvidenceOutcome(
         fqdn=fqdn,
         evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
         source_method="generated_candidate",
         detail=f"Skipped: parent {parent} did not validate",
+        evidence_trace=list(evidence_trace or []),
     )
 
 
@@ -113,12 +120,14 @@ def outcome_ignored_unrelated_authority(
     *,
     source_method: str,
     detail: str,
+    evidence_trace: list[EvidenceTrace] | None = None,
 ) -> EvidenceOutcome:
     return EvidenceOutcome(
         fqdn=fqdn,
         evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
         source_method=source_method,
         detail=detail,
+        evidence_trace=list(evidence_trace or []),
     )
 
 
@@ -127,12 +136,14 @@ def outcome_inconclusive_dns_failure(
     *,
     source_method: str,
     detail: str,
+    evidence_trace: list[EvidenceTrace] | None = None,
 ) -> EvidenceOutcome:
     return EvidenceOutcome(
         fqdn=fqdn,
         evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
         source_method=source_method,
         detail=detail,
+        evidence_trace=list(evidence_trace or []),
     )
 
 

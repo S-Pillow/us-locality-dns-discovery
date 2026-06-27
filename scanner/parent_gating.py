@@ -93,78 +93,95 @@ def decide_parent_gating_from_probe_classes(
     classes_seen: set[DNSResponseClass],
     *,
     saw_unrelated_authority: bool = False,
+    evidence_trace: list | None = None,
 ) -> ParentGatingDecision:
     """Map aggregated parent probe classes to a conservative gating decision."""
+    traces = list(evidence_trace or [])
+
+    def _finalize(decision: ParentGatingDecision) -> ParentGatingDecision:
+        decision.evidence_trace = traces
+        return decision
+
     if classes_seen & _POSITIVE_CLASSES:
         return decision_for_validated_parent(parent_name, record_count=0)
 
     if classes_seen & _INCONCLUSIVE_CLASSES:
-        return ParentGatingDecision(
+        return _finalize(
+            ParentGatingDecision(
+                allow_descendants=False,
+                parent_name=parent_name,
+                reason="Parent validation inconclusive",
+                evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
+                response_class=next(iter(classes_seen & _INCONCLUSIVE_CLASSES)).value,
+                confidence=ParentGatingConfidence.INCONCLUSIVE,
+                diagnostic_message=(
+                    f"Skipped deeper candidates because parent validation was inconclusive for "
+                    f"{parent_name}."
+                ),
+            )
+        )
+
+    if saw_unrelated_authority or DNSResponseClass.UNRELATED_AUTHORITY in classes_seen:
+        return _finalize(
+            ParentGatingDecision(
+                allow_descendants=False,
+                parent_name=parent_name,
+                reason="Ignored unrelated authority while validating parent",
+                evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+                response_class=DNSResponseClass.UNRELATED_AUTHORITY.value,
+                confidence=ParentGatingConfidence.IGNORED_AUTHORITY,
+                diagnostic_message=(
+                    f"Ignored unrelated authority while validating parent {parent_name}; "
+                    "descendant testing was skipped because the parent was not validated."
+                ),
+            )
+        )
+
+    if DNSResponseClass.NEGATIVE_NXDOMAIN in classes_seen:
+        return _finalize(
+            ParentGatingDecision(
+                allow_descendants=False,
+                parent_name=parent_name,
+                reason="Parent returned NXDOMAIN",
+                evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+                response_class=DNSResponseClass.NEGATIVE_NXDOMAIN.value,
+                confidence=ParentGatingConfidence.CONFIDENT_NEGATIVE,
+                diagnostic_message=(
+                    f"Skipped deeper candidates because parent validation returned NXDOMAIN for "
+                    f"{parent_name}."
+                ),
+            )
+        )
+
+    if classes_seen and classes_seen <= frozenset({DNSResponseClass.NODATA_EMPTY_ANSWER}):
+        return _finalize(
+            ParentGatingDecision(
+                allow_descendants=False,
+                parent_name=parent_name,
+                reason="Parent NODATA/empty response",
+                evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+                response_class=DNSResponseClass.NODATA_EMPTY_ANSWER.value,
+                confidence=ParentGatingConfidence.HEURISTIC_SKIP,
+                diagnostic_message=(
+                    f"Skipped deeper candidates after NODATA/empty parent response for {parent_name}; "
+                    "this is a performance/evidence-quality choice, not proof that no deeper names exist."
+                ),
+            )
+        )
+
+    return _finalize(
+        ParentGatingDecision(
             allow_descendants=False,
             parent_name=parent_name,
             reason="Parent validation inconclusive",
             evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
-            response_class=next(iter(classes_seen & _INCONCLUSIVE_CLASSES)).value,
+            response_class=None,
             confidence=ParentGatingConfidence.INCONCLUSIVE,
             diagnostic_message=(
                 f"Skipped deeper candidates because parent validation was inconclusive for "
                 f"{parent_name}."
             ),
         )
-
-    if saw_unrelated_authority or DNSResponseClass.UNRELATED_AUTHORITY in classes_seen:
-        return ParentGatingDecision(
-            allow_descendants=False,
-            parent_name=parent_name,
-            reason="Ignored unrelated authority while validating parent",
-            evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
-            response_class=DNSResponseClass.UNRELATED_AUTHORITY.value,
-            confidence=ParentGatingConfidence.IGNORED_AUTHORITY,
-            diagnostic_message=(
-                f"Ignored unrelated authority while validating parent {parent_name}; "
-                "descendant testing was skipped because the parent was not validated."
-            ),
-        )
-
-    if DNSResponseClass.NEGATIVE_NXDOMAIN in classes_seen:
-        return ParentGatingDecision(
-            allow_descendants=False,
-            parent_name=parent_name,
-            reason="Parent returned NXDOMAIN",
-            evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
-            response_class=DNSResponseClass.NEGATIVE_NXDOMAIN.value,
-            confidence=ParentGatingConfidence.CONFIDENT_NEGATIVE,
-            diagnostic_message=(
-                f"Skipped deeper candidates because parent validation returned NXDOMAIN for "
-                f"{parent_name}."
-            ),
-        )
-
-    if classes_seen and classes_seen <= frozenset({DNSResponseClass.NODATA_EMPTY_ANSWER}):
-        return ParentGatingDecision(
-            allow_descendants=False,
-            parent_name=parent_name,
-            reason="Parent NODATA/empty response",
-            evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
-            response_class=DNSResponseClass.NODATA_EMPTY_ANSWER.value,
-            confidence=ParentGatingConfidence.HEURISTIC_SKIP,
-            diagnostic_message=(
-                f"Skipped deeper candidates after NODATA/empty parent response for {parent_name}; "
-                "this is a performance/evidence-quality choice, not proof that no deeper names exist."
-            ),
-        )
-
-    return ParentGatingDecision(
-        allow_descendants=False,
-        parent_name=parent_name,
-        reason="Parent validation inconclusive",
-        evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
-        response_class=None,
-        confidence=ParentGatingConfidence.INCONCLUSIVE,
-        diagnostic_message=(
-            f"Skipped deeper candidates because parent validation was inconclusive for "
-            f"{parent_name}."
-        ),
     )
 
 
@@ -179,4 +196,5 @@ def outcome_from_parent_gating_skip(
         evidence_status=status,
         source_method="generated_candidate",
         detail=decision.diagnostic_message,
+        evidence_trace=list(decision.evidence_trace),
     )

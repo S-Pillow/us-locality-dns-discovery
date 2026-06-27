@@ -83,6 +83,10 @@ Source-controlled fields live in `scanner/version.py`:
 Reports include `app_version`, `source_build_label`, and `source_commit` in
 Scan Settings when exported.
 
+JSON scan reports include structured `evidence_trace` arrays on findings and
+`evidence_diagnostics` entries for auditability. CSV/XLSX workbooks remain
+summary-oriented; use JSON for full raw DNS evidence trace.
+
 Update `SOURCE_COMMIT` manually when preparing a release; runtime Git queries
 are intentionally not used.
 

@@ -26,6 +26,7 @@ from scanner.version import (
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.input_loader import PREFERRED_INPUT_FORMAT_NOTE, RECOMMENDED_INPUT_COLUMNS_CSV
 from scanner.evidence_status import resolve_evidence_status
+from scanner.evidence_trace import traces_to_dicts
 from scanner.models import (
     DiscoveredRecord,
     DomainInputRecord,
@@ -2205,6 +2206,7 @@ def _finding_to_dict(
         "value": _record_value(record) or record.value,
         "ttl": record.ttl,
         "error": None,
+        "evidence_trace": traces_to_dicts(record.evidence_trace),
     }
 
 
@@ -2279,6 +2281,7 @@ def build_json_document(result: ScanRunResult) -> dict:
                     "evidence_status": outcome.evidence_status.value,
                     "source": _map_source_method(outcome.source_method),
                     "detail": outcome.detail,
+                    "evidence_trace": traces_to_dicts(outcome.evidence_trace),
                 }
             )
 

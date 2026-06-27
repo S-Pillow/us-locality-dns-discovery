@@ -28,6 +28,13 @@ from scanner.evidence_status import (
     outcome_inconclusive_dns_failure,
     stamp_record_evidence_status,
 )
+from scanner.evidence_trace import (
+    _resolver_label,
+    build_promotion_trace,
+    build_rejection_trace,
+    probe_traces_for_parent,
+    promotion_traces_from_response,
+)
 from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.parent_gating import (
     decide_parent_gating_from_probe_classes,
@@ -705,6 +712,7 @@ def _validate_fourth_level_parent(
     elif delegation.log_message:
         _emit(f"    {delegation.log_message}", progress, messages)
 
+    parent_diagnostic_traces: list = []
     other_findings, parent_errors = _query_records(
         parent,
         CANDIDATE_RECORD_TYPES,
@@ -715,6 +723,7 @@ def _validate_fourth_level_parent(
         log_sink=messages,
         evidence_outcomes=result.evidence_outcomes,
         response_classes=probe_classes,
+        diagnostic_traces=parent_diagnostic_traces,
     )
     for item in other_findings:
         item.confidence = _confidence_for(
@@ -741,12 +750,21 @@ def _validate_fourth_level_parent(
         return decision
 
     classes_seen = set(probe_classes)
+    parent_probe_traces = list(parent_diagnostic_traces)
     if not classes_seen:
         classes_seen = probe_parent_response_classes(
             parent,
             CANDIDATE_RECORD_TYPES,
             _send_dns_query,
             resolver,
+        )
+    if not parent_probe_traces:
+        parent_probe_traces = probe_traces_for_parent(
+            parent,
+            CANDIDATE_RECORD_TYPES,
+            _send_dns_query,
+            resolver,
+            source_method=FIFTH_LEVEL_PARENT_SOURCE,
         )
     saw_unrelated = any(
         item.evidence_status == EvidenceStatus.IGNORED_UNRELATED_AUTHORITY
@@ -761,6 +779,7 @@ def _validate_fourth_level_parent(
         parent,
         classes_seen,
         saw_unrelated_authority=saw_unrelated,
+        evidence_trace=parent_probe_traces,
     )
     _emit(f"    {decision.diagnostic_message}", progress, messages)
     return decision
@@ -886,6 +905,7 @@ def _append_soa_finding(
     nameserver: str | None,
     from_authority: bool,
     authoritative_response: bool,
+    evidence_trace: list | None = None,
 ) -> None:
     classification = _soa_classification(fqdn, base_domain, from_authority)
     confidence = "high" if authoritative_response else "medium"
@@ -899,6 +919,7 @@ def _append_soa_finding(
         confidence=confidence,
         nameserver=nameserver,
         ttl=ttl,
+        evidence_trace=list(evidence_trace or []),
     )
     if not any(
         item.fqdn == finding.fqdn
@@ -920,11 +941,26 @@ def _parse_dns_response(
     classification: FindingClassification,
     nameserver: str | None,
     confidence: str = "normal",
+    resolver_or_server: str | None = None,
 ) -> list[DiscoveredRecord]:
     """Extract owner-matching ANSWER records and AUTHORITY-section SOA evidence."""
     findings: list[DiscoveredRecord] = []
     authoritative_response = bool(response.flags & dns.flags.AA)
     saw_soa_answer = False
+    promotion_traces = promotion_traces_from_response(
+        response,
+        fqdn,
+        record_type,
+        source_method=source_method,
+        resolver_or_server=resolver_or_server,
+        classification=classification,
+        evidence_status=None,
+        format_rdata=_format_rdata,
+    )
+    trace_by_value: dict[tuple[str, str], object] = {}
+    for trace in promotion_traces:
+        if trace.rr_value is not None and trace.rr_owner is not None and trace.rr_type is not None:
+            trace_by_value[(trace.rr_owner, trace.rr_type, trace.rr_value)] = trace
 
     queried = _display_name(fqdn)
     for rrset in response.answer:
@@ -940,6 +976,8 @@ def _parse_dns_response(
         ttl = rrset.ttl
         for rdata in rrset:
             if parsed_type == RecordType.SOA:
+                soa_value = _format_rdata(parsed_type, rdata)
+                soa_trace = trace_by_value.get((owner, parsed_type.value, soa_value))
                 _append_soa_finding(
                     findings,
                     fqdn=owner,
@@ -950,24 +988,27 @@ def _parse_dns_response(
                     nameserver=nameserver,
                     from_authority=False,
                     authoritative_response=authoritative_response,
+                    evidence_trace=[soa_trace] if soa_trace else [],
                 )
                 continue
             item_classification = classification
             if item_classification == FindingClassification.DELEGATED_CHILD_ZONE:
                 # Delegation Verification Mode: raw parse never promotes zones.
                 item_classification = FindingClassification.STANDARD_RECORD
-            findings.append(
-                DiscoveredRecord(
-                    fqdn=owner,
-                    record_type=parsed_type,
-                    value=_format_rdata(parsed_type, rdata),
-                    source_method=source_method,
-                    classification=item_classification,
-                    confidence="high" if authoritative_response else confidence,
-                    nameserver=nameserver,
-                    ttl=ttl,
-                )
+            rr_value = _format_rdata(parsed_type, rdata)
+            matched_trace = trace_by_value.get((owner, parsed_type.value, rr_value))
+            finding = DiscoveredRecord(
+                fqdn=owner,
+                record_type=parsed_type,
+                value=rr_value,
+                source_method=source_method,
+                classification=item_classification,
+                confidence="high" if authoritative_response else confidence,
+                nameserver=nameserver,
+                ttl=ttl,
+                evidence_trace=[matched_trace] if matched_trace else [],
             )
+            findings.append(finding)
 
     if not saw_soa_answer:
         for rrset in response.authority:
@@ -977,6 +1018,23 @@ def _parse_dns_response(
             if not _owner_matches_queried(owner, queried):
                 continue
             for rdata in rrset:
+                soa_value = _format_rdata(RecordType.SOA, rdata)
+                owner_norm = _display_name(owner)
+                auth_trace = build_promotion_trace(
+                    qname=fqdn,
+                    qtype=record_type.value,
+                    response=response,
+                    section="authority",
+                    rr_owner=owner_norm,
+                    rr_type="SOA",
+                    rr_value=soa_value,
+                    source_method=source_method,
+                    resolver_or_server=resolver_or_server,
+                    response_class=DNSResponseClass.NODATA_EMPTY_ANSWER,
+                    evidence_status=EvidenceStatus.CONFIRMED_ORDINARY_DNS_NAME,
+                    finding_type=_soa_classification(fqdn, base_domain, True),
+                    promotion_reason="Owner-matching SOA in AUTHORITY section",
+                )
                 _append_soa_finding(
                     findings,
                     fqdn=owner,
@@ -987,6 +1045,7 @@ def _parse_dns_response(
                     nameserver=nameserver,
                     from_authority=True,
                     authoritative_response=authoritative_response,
+                    evidence_trace=[auth_trace],
                 )
 
     return findings
@@ -1024,6 +1083,7 @@ def _query_records(
     log_sink: list[str] | None = None,
     evidence_outcomes: list[EvidenceOutcome] | None = None,
     response_classes: list[DNSResponseClass] | None = None,
+    diagnostic_traces: list | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
     """Query *fqdn* for each of *record_types*; return findings and error strings.
 
@@ -1036,6 +1096,31 @@ def _query_records(
     errors: list[str] = []
     qname = _query_name(fqdn)
     zone_base = _display_name(base_domain or fqdn)
+    resolver_label = _resolver_label(resolver, nameserver)
+
+    def _record_diagnostic_trace(
+        rc: DNSResponseClass,
+        response: dns.message.Message | None,
+        transport_error: str | None,
+        *,
+        rejection_reason: str,
+        evidence_status: EvidenceStatus | None = None,
+    ) -> None:
+        if diagnostic_traces is None:
+            return
+        diagnostic_traces.append(
+            build_rejection_trace(
+                qname=fqdn,
+                qtype=record_type.value,
+                response=response,
+                transport_error=transport_error,
+                response_class=rc,
+                source_method=source_method,
+                resolver_or_server=resolver_label,
+                rejection_reason=rejection_reason,
+                evidence_status=evidence_status,
+            )
+        )
 
     for record_type in record_types:
         if classification == FindingClassification.DELEGATED_CHILD_ZONE:
@@ -1050,6 +1135,13 @@ def _query_records(
 
         if rc == DNSResponseClass.TIMEOUT:
             errors.append(transport_error or f"{qname} {record_type.value}: timeout")
+            _record_diagnostic_trace(
+                rc,
+                response,
+                transport_error,
+                rejection_reason=transport_error or "DNS query timeout",
+                evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
+            )
             continue
 
         if rc == DNSResponseClass.MALFORMED_OR_UNUSABLE:
@@ -1062,13 +1154,34 @@ def _query_records(
                     )
                 except Exception:
                     pass
+            _record_diagnostic_trace(
+                rc,
+                response,
+                transport_error,
+                rejection_reason="Malformed or unusable DNS response",
+                evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
+            )
             continue
 
         if rc == DNSResponseClass.SERVFAIL:
             errors.append(f"{qname} {record_type.value}: SERVFAIL")
+            _record_diagnostic_trace(
+                rc,
+                response,
+                transport_error,
+                rejection_reason=f"{qname} {record_type.value}: SERVFAIL",
+                evidence_status=EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
+            )
             continue
 
         if rc == DNSResponseClass.NEGATIVE_NXDOMAIN:
+            _record_diagnostic_trace(
+                rc,
+                response,
+                transport_error,
+                rejection_reason=f"{qname} returned NXDOMAIN for {record_type.value}",
+                evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+            )
             continue
 
         if rc == DNSResponseClass.UNRELATED_AUTHORITY:
@@ -1076,19 +1189,38 @@ def _query_records(
                 log_sink.append(
                     f"Ignored unrelated authority data while checking {fqdn} ({record_type.value})"
                 )
+            trace = build_rejection_trace(
+                qname=fqdn,
+                qtype=record_type.value,
+                response=response,
+                transport_error=transport_error,
+                response_class=rc,
+                source_method=source_method,
+                resolver_or_server=resolver_label,
+                rejection_reason=f"Unrelated authority while checking {record_type.value}",
+                evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+            )
+            if diagnostic_traces is not None:
+                diagnostic_traces.append(trace)
             if evidence_outcomes is not None:
                 evidence_outcomes.append(
                     outcome_ignored_unrelated_authority(
                         fqdn,
                         source_method=source_method,
                         detail=f"Unrelated authority while checking {record_type.value}",
+                        evidence_trace=[trace],
                     )
                 )
             continue
 
         if rc == DNSResponseClass.NODATA_EMPTY_ANSWER:
-            # Fail-closed: zone exists but queried type is absent (or answer
-            # and authority are both empty).  No direct finding.
+            _record_diagnostic_trace(
+                rc,
+                response,
+                transport_error,
+                rejection_reason=f"NODATA/empty answer for {record_type.value}",
+                evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+            )
             continue
 
         # rc in {OWNER_MATCHING_ANSWER, CNAME_ALIAS, REFERRAL_DELEGATION}
@@ -1101,6 +1233,7 @@ def _query_records(
             classification=classification,
             nameserver=nameserver,
             confidence=confidence,
+            resolver_or_server=resolver_label,
         )
         findings.extend(parsed)
 

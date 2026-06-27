@@ -175,6 +175,29 @@ class EvidenceStatus(str, Enum):
 
 
 @dataclass
+class EvidenceTrace:
+    """Structured raw DNS evidence explaining a finding or diagnostic outcome."""
+
+    qname: str
+    normalized_qname: str
+    qtype: str
+    rcode: str | None = None
+    section: str | None = None
+    rr_owner: str | None = None
+    normalized_rr_owner: str | None = None
+    rr_type: str | None = None
+    rr_value: str | None = None
+    resolver_or_server: str | None = None
+    authoritative_flag: bool | None = None
+    source_path: str = "unknown"
+    response_class: str | None = None
+    evidence_status: str | None = None
+    finding_type: str | None = None
+    promotion_reason: str | None = None
+    rejection_reason: str | None = None
+
+
+@dataclass
 class EvidenceOutcome:
     """Non-finding or diagnostic evidence status for a tested name."""
 
@@ -182,6 +205,7 @@ class EvidenceOutcome:
     evidence_status: EvidenceStatus
     source_method: str
     detail: str = ""
+    evidence_trace: list[EvidenceTrace] = field(default_factory=list)
 
 
 class ParentGatingConfidence(str, Enum):
@@ -206,6 +230,7 @@ class ParentGatingDecision:
     response_class: str | None
     confidence: ParentGatingConfidence
     diagnostic_message: str
+    evidence_trace: list[EvidenceTrace] = field(default_factory=list)
 
 
 class FindingClassification(str, Enum):
@@ -279,6 +304,7 @@ class DiscoveredRecord:
     nameserver: Optional[str] = None
     ttl: Optional[int] = None
     evidence_status: EvidenceStatus | None = None
+    evidence_trace: list[EvidenceTrace] = field(default_factory=list)
 
 
 @dataclass

@@ -18,6 +18,8 @@ import dns.message
 import dns.rdatatype
 
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
+from scanner.evidence_status import outcome_ignored_unrelated_authority
+from scanner.evidence_trace import build_promotion_trace, build_rejection_trace, promotion_traces_from_response
 from scanner.models import (
     DiscoveredRecord,
     EvidenceOutcome,
@@ -25,7 +27,6 @@ from scanner.models import (
     FindingClassification,
     RecordType,
 )
-from scanner.evidence_status import outcome_ignored_unrelated_authority
 
 SendQueryFn = Callable[
     [str, RecordType, object],
@@ -133,11 +134,26 @@ def _records_from_parent_side_ns(
 ) -> list[DiscoveredRecord]:
     records: list[DiscoveredRecord] = []
     seen: set[tuple[str, str]] = set()
-    for _owner, target, ttl, _section in ns_entries:
+    for owner, target, ttl, section in ns_entries:
         key = (_norm_name(candidate), target)
         if key in seen:
             continue
         seen.add(key)
+        trace = build_promotion_trace(
+            qname=_norm_name(candidate),
+            qtype="NS",
+            response=None,
+            section=section,
+            rr_owner=_norm_name(candidate),
+            rr_type="NS",
+            rr_value=target,
+            source_method=source_method,
+            resolver_or_server=nameserver,
+            response_class=DNSResponseClass.OWNER_MATCHING_ANSWER,
+            evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
+            finding_type=FindingClassification.DELEGATED_CHILD_ZONE,
+            promotion_reason="Verified delegation via owner-matching NS",
+        )
         records.append(
             DiscoveredRecord(
                 fqdn=_norm_name(candidate),
@@ -149,6 +165,7 @@ def _records_from_parent_side_ns(
                 nameserver=nameserver,
                 ttl=ttl,
                 evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
+                evidence_trace=[trace],
             )
         )
     return records
@@ -169,16 +186,28 @@ def _record_from_apex_soa(
         if owner != nq:
             continue
         for rdata in rrset:
+            soa_value = _format_soa(rdata)
+            traces = promotion_traces_from_response(
+                response,
+                nq,
+                RecordType.SOA,
+                source_method=source_method,
+                resolver_or_server=nameserver,
+                classification=FindingClassification.ZONE_SOA_DISCOVERED,
+                evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
+                format_rdata=lambda _rt, rd: _format_soa(rd),
+            )
             return DiscoveredRecord(
                 fqdn=nq,
                 record_type=RecordType.SOA,
-                value=_format_soa(rdata),
+                value=soa_value,
                 source_method=source_method,
                 classification=FindingClassification.ZONE_SOA_DISCOVERED,
                 confidence="high",
                 nameserver=nameserver,
                 ttl=rrset.ttl,
                 evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE,
+                evidence_trace=traces,
             )
     return None
 
@@ -306,11 +335,23 @@ def verify_delegated_child_zone(
             if reason:
                 last_log = reason
                 if rc == DNSResponseClass.UNRELATED_AUTHORITY:
+                    ignored_trace = build_rejection_trace(
+                        qname=candidate_norm,
+                        qtype=RecordType.NS.value,
+                        response=response,
+                        transport_error=transport_error,
+                        response_class=rc,
+                        source_method=source_method,
+                        resolver_or_server=f"{ns_host} ({ns_ip})",
+                        rejection_reason=reason,
+                        evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+                    )
                     evidence_outcomes.append(
                         outcome_ignored_unrelated_authority(
                             candidate_norm,
                             source_method=source_method,
                             detail=reason,
+                            evidence_trace=[ignored_trace],
                         )
                     )
 
@@ -353,11 +394,23 @@ def verify_delegated_child_zone(
             if ns_reason:
                 last_log = ns_reason
                 if ns_rc == DNSResponseClass.UNRELATED_AUTHORITY:
+                    ignored_trace = build_rejection_trace(
+                        qname=candidate_norm,
+                        qtype=RecordType.NS.value,
+                        response=ns_response,
+                        transport_error=ns_error,
+                        response_class=ns_rc,
+                        source_method=source_method,
+                        resolver_or_server=nameserver,
+                        rejection_reason=ns_reason,
+                        evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+                    )
                     evidence_outcomes.append(
                         outcome_ignored_unrelated_authority(
                             candidate_norm,
                             source_method=source_method,
                             detail=ns_reason,
+                            evidence_trace=[ignored_trace],
                         )
                     )
 
@@ -399,11 +452,23 @@ def verify_delegated_child_zone(
                     else "unrelated authority SOA"
                 )
                 last_log = _delegation_log_ignored_signal(candidate_norm, detail)
+                ignored_trace = build_rejection_trace(
+                    qname=candidate_norm,
+                    qtype=RecordType.SOA.value,
+                    response=soa_response,
+                    transport_error=soa_error,
+                    response_class=soa_rc,
+                    source_method=source_method,
+                    resolver_or_server=nameserver,
+                    rejection_reason=last_log,
+                    evidence_status=EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
+                )
                 evidence_outcomes.append(
                     outcome_ignored_unrelated_authority(
                         candidate_norm,
                         source_method=source_method,
                         detail=last_log,
+                        evidence_trace=[ignored_trace],
                     )
                 )
 
