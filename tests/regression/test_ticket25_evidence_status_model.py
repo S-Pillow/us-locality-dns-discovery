@@ -39,6 +39,8 @@ from scanner.models import (
     EvidenceOutcome,
     EvidenceStatus,
     FindingClassification,
+    ParentGatingConfidence,
+    ParentGatingDecision,
     RecordType,
     ScanInput,
     ScanOptions,
@@ -261,7 +263,19 @@ def test_parent_gating_skipped_status() -> None:
     base = BASE
     parent = "co.ci.lawrence.ma.us"
     fifth = f"portal.{parent}"
-    parent_failed = {parent}
+    parent_decisions = {
+        parent: ParentGatingDecision(
+            allow_descendants=False,
+            parent_name=parent,
+            reason="Parent returned NXDOMAIN",
+            evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+            response_class="negative_nxdomain",
+            confidence=ParentGatingConfidence.CONFIDENT_NEGATIVE,
+            diagnostic_message=(
+                f"Skipped deeper candidates because parent validation returned NXDOMAIN for {parent}."
+            ),
+        )
+    }
     domain_result = DomainScanResult(domain=base)
     messages: list[str] = []
 
@@ -289,7 +303,7 @@ def test_parent_gating_skipped_status() -> None:
                 candidates_total=1,
                 validate_fifth_level_parents=True,
                 parent_passed=set(),
-                parent_failed=parent_failed,
+                parent_decisions=parent_decisions,
             )
             mock_verify.assert_not_called()
 

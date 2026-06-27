@@ -28,6 +28,7 @@ from scanner.models import (
     DomainInputRecord,
     DomainScanResult,
     FindingClassification,
+    ParentGatingDecision,
     RecordType,
     ScanInput,
     ScanOptions,
@@ -118,7 +119,7 @@ def _run_gated(
     candidates: list[str],
     responses: dict[QueryKey, dns.message.Message],
     parent_passed: set[str] | None = None,
-    parent_failed: set[str] | None = None,
+    parent_decisions: dict | None = None,
     input_record: DomainInputRecord | None = None,
 ) -> tuple[DomainScanResult, dict[str, int]]:
     """Run _test_candidates with parent gating; return (result, per-fqdn query counts)."""
@@ -137,7 +138,7 @@ def _run_gated(
         return resp, None
 
     pp: set[str] = set() if parent_passed is None else set(parent_passed)
-    pf: set[str] = set() if parent_failed is None else set(parent_failed)
+    pd: dict[str, ParentGatingDecision] = dict(parent_decisions or {})
 
     with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send), patch(
         "scanner.scan_engine._get_parent_ns_hosts", return_value=["ns.parent.example"]
@@ -161,7 +162,7 @@ def _run_gated(
             candidates_total=len(candidates),
             validate_fifth_level_parents=True,
             parent_passed=pp,
-            parent_failed=pf,
+            parent_decisions=pd,
         )
     return result, query_counts
 

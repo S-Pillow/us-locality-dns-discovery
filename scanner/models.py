@@ -184,6 +184,30 @@ class EvidenceOutcome:
     detail: str = ""
 
 
+class ParentGatingConfidence(str, Enum):
+    """How confidently a parent-gating decision was reached."""
+
+    CONFIDENT_NEGATIVE = "confident_negative"
+    VALIDATED_PARENT = "validated_parent"
+    KNOWN_PARENT = "known_parent"
+    HEURISTIC_SKIP = "heuristic_skip"
+    INCONCLUSIVE = "inconclusive"
+    IGNORED_AUTHORITY = "ignored_authority"
+
+
+@dataclass
+class ParentGatingDecision:
+    """Structured outcome for fifth-level parent gating."""
+
+    allow_descendants: bool
+    parent_name: str
+    reason: str
+    evidence_status: EvidenceStatus | None
+    response_class: str | None
+    confidence: ParentGatingConfidence
+    diagnostic_message: str
+
+
 class FindingClassification(str, Enum):
     """How a discovery finding should be interpreted in reports."""
 

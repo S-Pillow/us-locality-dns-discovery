@@ -26,10 +26,17 @@ from scanner.evidence_status import (
     outcome_candidate_tested,
     outcome_ignored_unrelated_authority,
     outcome_inconclusive_dns_failure,
-    outcome_skipped_by_parent_gating,
     stamp_record_evidence_status,
 )
 from scanner.input_loader import load_domain_inputs, load_domains
+from scanner.parent_gating import (
+    decide_parent_gating_from_probe_classes,
+    decision_for_fourth_level_tested_without_evidence,
+    decision_for_known_parent,
+    decision_for_validated_parent,
+    outcome_from_parent_gating_skip,
+    probe_parent_response_classes,
+)
 from scanner.models import (
     CancellationToken,
     DiscoveredRecord,
@@ -39,6 +46,7 @@ from scanner.models import (
     EvidenceOutcome,
     EvidenceStatus,
     FindingClassification,
+    ParentGatingDecision,
     PreflightSummary,
     ProgressCallback,
     RecordType,
@@ -654,9 +662,10 @@ def _validate_fourth_level_parent(
     wildcard_suspected: bool,
     progress: ProgressCallback | None,
     messages: list[str],
-) -> bool:
-    """Directly test an implied 4th-level parent; return True if usable findings were added."""
+) -> ParentGatingDecision:
+    """Directly test an implied 4th-level parent; return a structured gating decision."""
     added_records = 0
+    probe_classes: list[DNSResponseClass] = []
     delegation = verify_delegated_child_zone(
         parent,
         base_domain=domain,
@@ -667,6 +676,7 @@ def _validate_fourth_level_parent(
         source_method=FIFTH_LEVEL_PARENT_SOURCE,
         log_sink=messages,
     )
+    result.evidence_outcomes.extend(delegation.evidence_outcomes)
     ns_findings = [
         item
         for item in delegation.records
@@ -704,6 +714,7 @@ def _validate_fourth_level_parent(
         base_domain=domain,
         log_sink=messages,
         evidence_outcomes=result.evidence_outcomes,
+        response_classes=probe_classes,
     )
     for item in other_findings:
         item.confidence = _confidence_for(
@@ -724,13 +735,35 @@ def _validate_fourth_level_parent(
             )
         )
 
-    if added_records:
-        _emit(
-            f"    4th-level parent validated: {parent} ({added_records} direct record(s))",
-            progress,
-            messages,
+    if added_records > 0 or delegation.verified:
+        decision = decision_for_validated_parent(parent, record_count=added_records)
+        _emit(f"    {decision.diagnostic_message}", progress, messages)
+        return decision
+
+    classes_seen = set(probe_classes)
+    if not classes_seen:
+        classes_seen = probe_parent_response_classes(
+            parent,
+            CANDIDATE_RECORD_TYPES,
+            _send_dns_query,
+            resolver,
         )
-    return added_records > 0
+    saw_unrelated = any(
+        item.evidence_status == EvidenceStatus.IGNORED_UNRELATED_AUTHORITY
+        and _names_match(item.fqdn, parent)
+        for item in delegation.evidence_outcomes
+    ) or any(
+        item.evidence_status == EvidenceStatus.IGNORED_UNRELATED_AUTHORITY
+        and _names_match(item.fqdn, parent)
+        for item in result.evidence_outcomes
+    )
+    decision = decide_parent_gating_from_probe_classes(
+        parent,
+        classes_seen,
+        saw_unrelated_authority=saw_unrelated,
+    )
+    _emit(f"    {decision.diagnostic_message}", progress, messages)
+    return decision
 
 
 def _make_resolver(nameserver: str | None = None) -> dns.resolver.Resolver:
@@ -990,6 +1023,7 @@ def _query_records(
     base_domain: str | None = None,
     log_sink: list[str] | None = None,
     evidence_outcomes: list[EvidenceOutcome] | None = None,
+    response_classes: list[DNSResponseClass] | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
     """Query *fqdn* for each of *record_types*; return findings and error strings.
 
@@ -1011,6 +1045,8 @@ def _query_records(
         response, transport_error = _send_dns_query(fqdn, record_type, resolver)
 
         rc = classify_dns_response(response, fqdn, transport_error)
+        if response_classes is not None:
+            response_classes.append(rc)
 
         if rc == DNSResponseClass.TIMEOUT:
             errors.append(transport_error or f"{qname} {record_type.value}: timeout")
@@ -1304,9 +1340,13 @@ def _test_candidates(
     candidates_total: int,
     validate_fifth_level_parents: bool = False,
     parent_passed: set[str] | None = None,
+    parent_decisions: dict[str, ParentGatingDecision] | None = None,
     parent_failed: set[str] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
+    _ = parent_failed  # legacy verify scripts; decisions cache replaces this set
+    if parent_decisions is None:
+        parent_decisions = {}
     subdelegation_count = 0
     candidate_record_count = 0
     tested = 0
@@ -1352,38 +1392,39 @@ def _test_candidates(
             if (
                 validate_fifth_level_parents
                 and parent_passed is not None
-                and parent_failed is not None
+                and parent_decisions is not None
             ):
                 parent = _implied_fourth_level_parent(candidate, domain)
                 if parent:
                     parent_key = _display_name(parent)
 
-                    if parent_key in parent_failed:
-                        skipped_fifth += 1
-                        parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
-                        result.evidence_outcomes.append(
-                            outcome_skipped_by_parent_gating(candidate, parent_key)
-                        )
-                        continue
-
                     if parent_key not in parent_passed:
-                        found = _name_has_usable_findings(parent, result) or _validate_fourth_level_parent(
-                            parent,
-                            domain=domain,
-                            resolver=resolver,
-                            result=result,
-                            wildcard_suspected=wildcard_suspected,
-                            progress=progress,
-                            messages=messages,
-                        )
-                        if found:
-                            parent_passed.add(parent_key)
-                        else:
-                            parent_failed.add(parent_key)
+                        cached = parent_decisions.get(parent_key)
+                        if cached is None:
+                            if _name_has_usable_findings(parent, result):
+                                cached = decision_for_validated_parent(
+                                    parent_key,
+                                    record_count=0,
+                                )
+                            else:
+                                cached = _validate_fourth_level_parent(
+                                    parent,
+                                    domain=domain,
+                                    resolver=resolver,
+                                    result=result,
+                                    wildcard_suspected=wildcard_suspected,
+                                    progress=progress,
+                                    messages=messages,
+                                )
+                            parent_decisions[parent_key] = cached
+                            if cached.allow_descendants:
+                                parent_passed.add(parent_key)
+
+                        if not cached.allow_descendants:
                             skipped_fifth += 1
                             parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
                             result.evidence_outcomes.append(
-                                outcome_skipped_by_parent_gating(candidate, parent_key)
+                                outcome_from_parent_gating_skip(candidate, cached)
                             )
                             continue
 
@@ -1479,7 +1520,7 @@ def _test_candidates(
 
     for parent_key, count in parent_skip_counts.items():
         _emit(
-            f"  Skipped {count} 5th-level candidate(s) under {parent_key}: parent did not validate.",
+            f"  Skipped {count} 5th-level candidate(s) under {parent_key}: parent gating blocked deeper testing.",
             progress,
             messages,
         )
@@ -1834,19 +1875,21 @@ def scan_domain(
             for d in (input_record.known_fourth_level_domains if input_record else [])
         }
         parent_passed: set[str] = set()
-        parent_failed: set[str] = set()
+        parent_decisions: dict[str, ParentGatingDecision] = {}
 
         for p in fifth_parents:
             pk = _display_name(p)
             if pk in known_input_parents:
                 parent_passed.add(pk)
+                parent_decisions[pk] = decision_for_known_parent(pk)
             elif pk in fourth_tested_names:
                 if _name_has_usable_findings(p, result):
                     parent_passed.add(pk)
+                    parent_decisions[pk] = decision_for_validated_parent(pk, record_count=0)
                 else:
-                    parent_failed.add(pk)
+                    parent_decisions[pk] = decision_for_fourth_level_tested_without_evidence(pk)
 
-        additional_parent_checks = len(fifth_parents) - len(parent_passed) - len(parent_failed)
+        additional_parent_checks = len(fifth_parents) - len(parent_decisions)
         _emit(
             "  5th-level parent gating: enabled "
             f"({len(fifth_parents)} unique parent name(s); "
@@ -1888,7 +1931,7 @@ def scan_domain(
             candidates_total=candidate_total,
             validate_fifth_level_parents=True,
             parent_passed=parent_passed,
-            parent_failed=parent_failed,
+            parent_decisions=parent_decisions,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested
