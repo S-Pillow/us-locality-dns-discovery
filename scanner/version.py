@@ -8,4 +8,4 @@ APP_VERSION = "0.24.0-source"
 EVIDENCE_MODEL_VERSION = "2.0-child-domain-discovery"
 SOURCE_BUILD_LABEL = "source"
 # Update manually when preparing a release or packaging build.
-SOURCE_COMMIT = "7f6b078"
+SOURCE_COMMIT = "d46779c"
