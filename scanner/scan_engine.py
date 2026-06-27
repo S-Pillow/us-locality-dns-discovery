@@ -27,8 +27,16 @@ from scanner.evidence_status import (
     outcome_candidate_tested,
     outcome_ignored_unrelated_authority,
     outcome_inconclusive_dns_failure,
+    outcome_suppressed_wildcard_match,
+    outcome_withheld_wildcard_inconclusive,
     resolve_evidence_status,
     stamp_record_evidence_status,
+)
+from scanner.wildcard_attestation import (
+    WildcardAttestation,
+    WildcardAttestationStatus,
+    candidate_differentiates,
+    run_wildcard_attestation,
 )
 from scanner.evidence_trace import (
     _resolver_label,
@@ -135,6 +143,7 @@ FIFTH_LEVEL_PREFIX_SOURCES = (
     "include_schools_libraries",
 )
 
+WILDCARD_ATTESTATION_PROBE_COUNT = 3  # ≥3 required by §2
 CANDIDATE_CANCEL_CHECK_INTERVAL = 5
 PARTIAL_SCAN_MESSAGE = (
     "This scan was cancelled before all domains were completed. Results are partial."
@@ -623,6 +632,18 @@ def _implied_fourth_level_parent(candidate: str, base_domain: str) -> str | None
         return None
     parent_relative = ".".join(parts[1:])
     return f"{parent_relative}.{base}"
+
+
+def _enumeration_parent(candidate: str) -> str:
+    """Return the direct enumeration parent of *candidate* (first label stripped).
+
+    For a 4th-level candidate ``mail.ci.lawrence.ma.us`` the parent is
+    ``ci.lawrence.ma.us`` (the base domain).  For a 5th-level candidate
+    ``admin.police.ci.lawrence.ma.us`` the parent is ``police.ci.lawrence.ma.us``.
+    Used by the wildcard attestation gate to scope probes per-parent (§1).
+    """
+    parts = _display_name(candidate).split(".")
+    return ".".join(parts[1:]) if len(parts) > 1 else candidate
 
 
 def _unique_fifth_level_parents(candidates: list[str], base_domain: str) -> set[str]:
@@ -1462,6 +1483,7 @@ def _test_candidates(
     resolver: dns.resolver.Resolver,
     result: DomainScanResult,
     wildcard_suspected: bool,
+    attestation_cache: dict[str, WildcardAttestation] | None = None,
     progress: ProgressCallback | None,
     messages: list[str],
     cancel_check: Callable[[], bool] | None,
@@ -1608,6 +1630,74 @@ def _test_candidates(
                 log_sink=messages,
                 evidence_outcomes=result.evidence_outcomes,
             )
+
+            # --- Wildcard attestation gate (R4a) ---
+            # Gate promotion of other_findings against the per-enumeration-parent
+            # attestation.  Delegation records (ns_findings / ZONE_SOA_DISCOVERED)
+            # are never gated — they are differentiation evidence by definition (§5).
+            wildcard_gate_applied = False
+            if other_findings and attestation_cache is not None:
+                parent_key = _enumeration_parent(candidate)
+                if parent_key not in attestation_cache:
+                    attestation_cache[parent_key] = run_wildcard_attestation(
+                        parent_key,
+                        _send_dns_query,
+                        resolver,
+                        probe_count=WILDCARD_ATTESTATION_PROBE_COUNT,
+                    )
+                attestation = attestation_cache[parent_key]
+
+                # Combine delegation evidence + other_findings for the full
+                # differentiation check so that delegation records can rescue
+                # a candidate whose A/AAAA happen to fall inside the pool.
+                all_candidate_evidence = [
+                    item
+                    for item in delegation.records
+                    if item.classification
+                    in (
+                        FindingClassification.DELEGATED_CHILD_ZONE,
+                        FindingClassification.ZONE_SOA_DISCOVERED,
+                    )
+                ] + list(other_findings)
+
+                if attestation.status == WildcardAttestationStatus.DETECTED:
+                    if not candidate_differentiates(all_candidate_evidence, attestation):
+                        # Response matches wildcard signature — suppress to diagnostic.
+                        # Gate code path: candidate_differentiates returned False,
+                        # so the promotion branch is not taken and the outcome below
+                        # routes the candidate to the diagnostics sheet via T31 routing.
+                        result.evidence_outcomes.append(
+                            outcome_suppressed_wildcard_match(
+                                candidate,
+                                parent=parent_key,
+                                source_method="generated_candidate",
+                            )
+                        )
+                        for item in other_findings:
+                            item.attestation_status = attestation.status.value
+                        other_findings = []
+                        wildcard_gate_applied = True
+                    else:
+                        # Differentiates from wildcard — stamp status, promote normally.
+                        for item in other_findings:
+                            item.attestation_status = attestation.status.value
+                elif attestation.status == WildcardAttestationStatus.INCONCLUSIVE:
+                    # Withhold: Light default; Deep-mode override is deferred (§3).
+                    result.evidence_outcomes.append(
+                        outcome_withheld_wildcard_inconclusive(
+                            candidate,
+                            parent=parent_key,
+                            source_method="generated_candidate",
+                        )
+                    )
+                    for item in other_findings:
+                        item.attestation_status = attestation.status.value
+                    other_findings = []
+                    wildcard_gate_applied = True
+                else:  # CLEAN
+                    for item in other_findings:
+                        item.attestation_status = attestation.status.value
+
             findings_added = 0
             for item in other_findings:
                 item.confidence = _confidence_for(
@@ -1648,6 +1738,7 @@ def _test_candidates(
                 not ns_findings
                 and not findings_added
                 and not candidate_errors_combined
+                and not wildcard_gate_applied
             ):
                 result.evidence_outcomes.append(
                     outcome_candidate_tested(candidate, source_method="generated_candidate")
@@ -1711,19 +1802,51 @@ def scan_domain(
     )
 
     wildcard_suspected = False
-    wildcard_logs: list[str] = []
+    attestation_cache: dict[str, WildcardAttestation] = {}
     with _PhaseHeartbeat(
         domain=domain,
         phase=ScanPhase.CHECKING_BASE.value,
         progress=progress,
         messages=messages,
     ):
-        wildcard_suspected, wildcard_logs = _wildcard_probe(domain)
-        result.wildcard_suspected = wildcard_suspected
-        for line in wildcard_logs:
-            _emit(f"  {line}", progress, messages)
-
+        # Create the resolver first so it can be shared with attestation probes.
         resolver = _make_resolver()
+
+        # Per-parent wildcard attestation replaces the old base-domain-scoped
+        # _wildcard_probe.  The base domain attestation doubles as the 4th-level
+        # parent cache entry (enumeration parent of every 4th-level candidate).
+        base_attestation = run_wildcard_attestation(
+            domain,
+            _send_dns_query,
+            resolver,
+            probe_count=WILDCARD_ATTESTATION_PROBE_COUNT,
+        )
+        attestation_cache[_display_name(domain)] = base_attestation
+        wildcard_suspected = base_attestation.status == WildcardAttestationStatus.DETECTED
+        result.wildcard_suspected = wildcard_suspected
+        if wildcard_suspected:
+            _emit(
+                f"  Wildcard detected at {domain}: "
+                f"{len(base_attestation.type_signatures)} type(s) in signature "
+                f"({', '.join(sorted(base_attestation.type_signatures))}). "
+                "Promotion will be gated on differentiation.",
+                progress,
+                messages,
+            )
+        elif base_attestation.status == WildcardAttestationStatus.INCONCLUSIVE:
+            _emit(
+                f"  Wildcard attestation inconclusive at {domain} "
+                f"({base_attestation.probes_with_answers}/{base_attestation.probes_attempted} "
+                "probes responded). Promotion withheld.",
+                progress,
+                messages,
+            )
+        else:
+            _emit(
+                "  Wildcard probe: no wildcard pattern detected using tested methods.",
+                progress,
+                messages,
+            )
         base_findings, base_errors = _query_records(
             domain,
             BASE_RECORD_TYPES,
@@ -1986,6 +2109,7 @@ def scan_domain(
         resolver=resolver,
         result=result,
         wildcard_suspected=wildcard_suspected,
+        attestation_cache=attestation_cache,
         progress=progress,
         messages=messages,
         cancel_check=cancel_check,
@@ -2053,6 +2177,7 @@ def scan_domain(
             resolver=resolver,
             result=result,
             wildcard_suspected=wildcard_suspected,
+            attestation_cache=attestation_cache,
             progress=progress,
             messages=messages,
             cancel_check=cancel_check,

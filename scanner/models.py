@@ -172,6 +172,11 @@ class EvidenceStatus(str, Enum):
     INCONCLUSIVE_DNS_FAILURE = "INCONCLUSIVE_DNS_FAILURE"
     IGNORED_UNRELATED_AUTHORITY = "IGNORED_UNRELATED_AUTHORITY"
     NOT_RECORDED = "NOT_RECORDED"
+    # Wildcard attestation outcomes (R4a)
+    SUPPRESSED_WILDCARD_MATCH = "SUPPRESSED_WILDCARD_MATCH"
+    """Candidate response matches the parent's wildcard signature; suppressed to diagnostic."""
+    WITHHELD_WILDCARD_INCONCLUSIVE = "WITHHELD_WILDCARD_INCONCLUSIVE"
+    """Wildcard attestation at parent was inconclusive; promotion withheld in Light mode."""
 
 
 @dataclass
@@ -206,6 +211,8 @@ class EvidenceOutcome:
     source_method: str
     detail: str = ""
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
+    # Per-parent wildcard attestation status attached at testing time (R4a).
+    attestation_status: str | None = None
 
 
 class ParentGatingConfidence(str, Enum):
@@ -305,6 +312,8 @@ class DiscoveredRecord:
     ttl: Optional[int] = None
     evidence_status: EvidenceStatus | None = None
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
+    # Per-parent wildcard attestation status attached at testing time (R4a).
+    attestation_status: str | None = None
 
 
 @dataclass
