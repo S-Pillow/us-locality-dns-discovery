@@ -26,6 +26,7 @@ import dns.rrset
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
 from scanner.models import (
     DiscoveredRecord,
@@ -313,8 +314,30 @@ def test_classify_malformed_or_unusable() -> None:
 # Section 2: Evidence rules — only allowed (class, rr_type) pairs create findings
 # ---------------------------------------------------------------------------
 
+def _verify_delegation_with_mocks(
+    candidate: str,
+    base_domain: str,
+    fake_send,
+    *,
+    parent_ns_hosts: list[str] | None = None,
+) -> list[DiscoveredRecord]:
+    """Run delegation verification with mocked DNS (Ticket 24 path)."""
+    def fake_resolve(_host: str) -> list[str]:
+        return ["127.0.0.1"]
+
+    result = verify_delegated_child_zone(
+        candidate,
+        base_domain=base_domain,
+        send_query=fake_send,
+        resolve_ns_ips=fake_resolve,
+        make_resolver=_make_resolver,
+        parent_ns_hosts=parent_ns_hosts or ["ns.parent.example"],
+    )
+    return result.records if result.verified else []
+
+
 def test_evidence_owner_matching_ns_creates_delegated_child_zone() -> None:
-    """Owner-matching NS in answer -> DELEGATED_CHILD_ZONE finding (via _parse_dns_response)."""
+    """Owner-matching NS via parent-authoritative verification -> DELEGATED_CHILD_ZONE."""
     candidate = "portal.example.pa.us"
 
     def fake_send(fqdn, record_type, resolver):
@@ -325,16 +348,11 @@ def test_evidence_owner_matching_ns_creates_delegated_child_zone() -> None:
         return _make_response(fqdn, record_type.value, dns.rcode.NXDOMAIN), None
 
     with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send):
-        findings, errors = _query_records(
-            candidate,
-            (RecordType.NS,),
-            _make_resolver(),
-            source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
-            base_domain="example.pa.us",
+        records = _verify_delegation_with_mocks(
+            candidate, "example.pa.us", fake_send, parent_ns_hosts=["ns.parent.us"]
         )
-    delegated = [f for f in findings if f.classification == FindingClassification.DELEGATED_CHILD_ZONE]
-    assert len(delegated) == 1, f"expected 1 delegated_child_zone, got {findings}"
+    delegated = [f for f in records if f.classification == FindingClassification.DELEGATED_CHILD_ZONE]
+    assert len(delegated) == 1, f"expected 1 delegated_child_zone, got {records}"
     assert delegated[0].fqdn == candidate
     assert delegated[0].record_type == RecordType.NS
     print("evidence: owner-matching NS -> delegated_child_zone: OK")
@@ -554,7 +572,7 @@ def test_no_finding_servfail() -> None:
             (RecordType.NS, RecordType.SOA),
             _make_resolver(),
             source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
+            classification=FindingClassification.STANDARD_RECORD,
             base_domain=BASE,
         )
     assert not findings, f"SERVFAIL: must not create findings: {findings}"
@@ -636,7 +654,7 @@ def test_false_positive_regression_unrelated_com_authority() -> None:
                 (RecordType.NS, RecordType.SOA, RecordType.A),
                 _make_resolver(),
                 source_method="generated_candidate",
-                classification=FindingClassification.DELEGATED_CHILD_ZONE,
+                classification=FindingClassification.STANDARD_RECORD,
                 base_domain=BASE,
                 log_sink=log_sink,
             )
@@ -706,7 +724,7 @@ def test_false_positive_regression_servfail_path() -> None:
 # ---------------------------------------------------------------------------
 
 def test_known_good_delegated_child_zone_via_answer_ns() -> None:
-    """A real NS delegation in the answer section still creates delegated_child_zone."""
+    """Parent-authoritative NS delegation still creates delegated_child_zone."""
     real_child = "ci.lawrence.ma.us"
 
     def fake_send(fqdn, record_type, resolver):
@@ -717,16 +735,11 @@ def test_known_good_delegated_child_zone_via_answer_ns() -> None:
         return _make_response(fqdn, record_type.value, dns.rcode.NXDOMAIN), None
 
     with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send):
-        findings, errors = _query_records(
-            real_child,
-            (RecordType.NS,),
-            _make_resolver(),
-            source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
-            base_domain=BASE,
+        records = _verify_delegation_with_mocks(
+            real_child, BASE, fake_send, parent_ns_hosts=["ns.lawrence.ma.us"]
         )
-    delegated = [f for f in findings if f.classification == FindingClassification.DELEGATED_CHILD_ZONE]
-    assert delegated, f"known-good NS delegation must still produce findings: {findings}"
+    delegated = [f for f in records if f.classification == FindingClassification.DELEGATED_CHILD_ZONE]
+    assert delegated, f"known-good NS delegation must still produce findings: {records}"
     assert delegated[0].record_type == RecordType.NS
     assert delegated[0].fqdn == real_child
     print("known-good: delegated_child_zone via answer NS: OK")
@@ -813,7 +826,7 @@ def test_known_good_log_diagnostic_for_unrelated_authority() -> None:
             (RecordType.NS,),
             _make_resolver(),
             source_method="generated_candidate",
-            classification=FindingClassification.DELEGATED_CHILD_ZONE,
+            classification=FindingClassification.STANDARD_RECORD,
             base_domain=BASE,
             log_sink=log_sink,
         )

@@ -20,6 +20,7 @@ import dns.rdatatype
 import dns.resolver
 import dns.zone
 
+from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response
 from scanner.input_loader import load_domain_inputs, load_domains
 from scanner.models import (
@@ -629,6 +630,12 @@ def _name_has_usable_findings(fqdn: str, result: DomainScanResult) -> bool:
     return False
 
 
+def _get_parent_ns_hosts(parent: str) -> list[str]:
+    """Return NS hostnames for *parent* via recursive discovery."""
+    hosts, _, _ = discover_authoritative_nameservers(parent)
+    return hosts
+
+
 def _validate_fourth_level_parent(
     parent: str,
     *,
@@ -641,15 +648,29 @@ def _validate_fourth_level_parent(
 ) -> bool:
     """Directly test an implied 4th-level parent; return True if usable findings were added."""
     added_records = 0
-    ns_findings, ns_errors = _query_records(
+    delegation = verify_delegated_child_zone(
         parent,
-        (RecordType.NS,),
-        resolver,
-        source_method=FIFTH_LEVEL_PARENT_SOURCE,
-        classification=FindingClassification.DELEGATED_CHILD_ZONE,
         base_domain=domain,
+        send_query=_send_dns_query,
+        resolve_ns_ips=_resolve_nameserver_ips,
+        make_resolver=_make_resolver,
+        get_parent_ns_hosts=_get_parent_ns_hosts,
+        source_method=FIFTH_LEVEL_PARENT_SOURCE,
         log_sink=messages,
     )
+    ns_findings = [
+        item
+        for item in delegation.records
+        if item.classification == FindingClassification.DELEGATED_CHILD_ZONE
+    ]
+    ns_errors = list(delegation.errors)
+    for item in delegation.records:
+        if item.classification == FindingClassification.ZONE_SOA_DISCOVERED:
+            item.confidence = _confidence_for(
+                wildcard_suspected, item.record_type, item.classification
+            )
+            result.records.append(item)
+            added_records += 1
     if ns_findings:
         for item in ns_findings:
             item.confidence = _confidence_for(
@@ -658,11 +679,12 @@ def _validate_fourth_level_parent(
             result.records.append(item)
             added_records += 1
         _emit(
-            f"    4th-level parent: {parent} NS "
-            f"{', '.join(item.value for item in ns_findings)}",
+            f"    {delegation.log_message or f'4th-level parent: {parent} NS verified'}",
             progress,
             messages,
         )
+    elif delegation.log_message:
+        _emit(f"    {delegation.log_message}", progress, messages)
 
     other_findings, parent_errors = _query_records(
         parent,
@@ -886,10 +908,10 @@ def _parse_dns_response(
                     authoritative_response=authoritative_response,
                 )
                 continue
-            if record_type == RecordType.NS and parsed_type == RecordType.NS:
-                item_classification = FindingClassification.DELEGATED_CHILD_ZONE
-            else:
-                item_classification = classification
+            item_classification = classification
+            if item_classification == FindingClassification.DELEGATED_CHILD_ZONE:
+                # Delegation Verification Mode: raw parse never promotes zones.
+                item_classification = FindingClassification.STANDARD_RECORD
             findings.append(
                 DiscoveredRecord(
                     fqdn=owner,
@@ -970,6 +992,10 @@ def _query_records(
     zone_base = _display_name(base_domain or fqdn)
 
     for record_type in record_types:
+        if classification == FindingClassification.DELEGATED_CHILD_ZONE:
+            # Delegated child-zone claims must go through verify_delegated_child_zone.
+            continue
+
         response, transport_error = _send_dns_query(fqdn, record_type, resolver)
 
         rc = classify_dns_response(response, fqdn, transport_error)
@@ -1333,15 +1359,29 @@ def _test_candidates(
                             parent_skip_counts[parent_key] = parent_skip_counts.get(parent_key, 0) + 1
                             continue
 
-            ns_findings, ns_candidate_errors = _query_records(
+            delegation = verify_delegated_child_zone(
                 candidate,
-                (RecordType.NS,),
-                resolver,
-                source_method="generated_candidate",
-                classification=FindingClassification.DELEGATED_CHILD_ZONE,
                 base_domain=domain,
+                send_query=_send_dns_query,
+                resolve_ns_ips=_resolve_nameserver_ips,
+                make_resolver=_make_resolver,
+                get_parent_ns_hosts=_get_parent_ns_hosts,
+                source_method="generated_candidate",
                 log_sink=messages,
             )
+            ns_findings = [
+                item
+                for item in delegation.records
+                if item.classification == FindingClassification.DELEGATED_CHILD_ZONE
+            ]
+            ns_candidate_errors = list(delegation.errors)
+            for item in delegation.records:
+                if item.classification == FindingClassification.ZONE_SOA_DISCOVERED:
+                    item.confidence = _confidence_for(
+                        wildcard_suspected, item.record_type, item.classification
+                    )
+                    result.records.append(item)
+                    candidate_record_count += 1
             if ns_findings:
                 subdelegation_count += 1
                 for item in ns_findings:
@@ -1349,12 +1389,9 @@ def _test_candidates(
                         wildcard_suspected, item.record_type, item.classification
                     )
                     result.records.append(item)
-                _emit(
-                    f"    Delegated child zone: {candidate} NS "
-                    f"{', '.join(item.value for item in ns_findings)}",
-                    progress,
-                    messages,
-                )
+                _emit(f"    {delegation.log_message}", progress, messages)
+            elif delegation.log_message:
+                _emit(f"    {delegation.log_message}", progress, messages)
 
             other_findings, candidate_errors = _query_records(
                 candidate,

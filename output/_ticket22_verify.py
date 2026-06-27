@@ -136,7 +136,9 @@ def _run_gated(
     pp: set[str] = set() if parent_passed is None else set(parent_passed)
     pf: set[str] = set() if parent_failed is None else set(parent_failed)
 
-    with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send):
+    with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send), patch(
+        "scanner.scan_engine._get_parent_ns_hosts", return_value=["ns.parent.example"]
+    ), patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]):
         _test_candidates(
             candidates=candidates,
             domain=base,
