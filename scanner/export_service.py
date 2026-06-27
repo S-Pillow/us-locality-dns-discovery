@@ -44,6 +44,11 @@ from scanner.scan_engine import (
     DNS_LIFETIME,
     DNS_TIMEOUT,
 )
+from scanner.wildcard_attestation import (
+    ATTESTATION_PROBE_TYPES,
+    MIN_PROBE_COUNT,
+    REASON_NO_WILDCARD,
+)
 
 APP_NAME = APP_DISPLAY_NAME
 CHILD_DOMAIN_DISCOVERY_GOAL = (
@@ -75,6 +80,32 @@ REVIEW_PATH_NOTE = (
     "Recommended review path: open Evidence Review first, focus on strong/moderate "
     "evidence_value rows with new_child_domains_found, use Verification guidance for "
     "optional independent dig checks, and rerun inconclusive rows before conclusions."
+)
+
+# ---------------------------------------------------------------------------
+# R4b — Wildcard Reporting Contract (§7–9)
+# ---------------------------------------------------------------------------
+
+# Internal attestation status values → contract external strings (§7).
+_ATTESTATION_STATUS_EXTERNAL: dict[str, str] = {
+    "clean": "wildcard_not_detected",
+    "detected": "wildcard_detected",
+    "inconclusive": "wildcard_inconclusive",
+}
+
+# Comma-separated RR types tested per probe cycle; constant for all findings.
+_WILDCARD_RRTYPES_TESTED: str = ",".join(ATTESTATION_PROBE_TYPES)
+
+# §9 contract phrasings — used in the notes / wildcard_note fields.
+WILDCARD_WORDING_DETECTED_PROMOTED = (
+    "Wildcard detected at parent scope; candidate differentiated and promoted."
+)
+WILDCARD_WORDING_SUPPRESSED = (
+    "Wildcard detected; candidate response matches parent wildcard signature. "
+    "Suppressed to diagnostic — not a confirmed finding."
+)
+WILDCARD_WORDING_INCONCLUSIVE = (
+    "Wildcard attestation inconclusive at parent scope; promotion withheld."
 )
 
 EVIDENCE_VALUE_ORDER = {
@@ -239,6 +270,21 @@ CSV_COLUMNS = [
     "error",
     "wordlist_sources",
     "notes",
+    # §7 wildcard attestation fields (R4b)
+    "wildcard_attestation_status",
+    "wildcard_parent_scope",
+    "wildcard_probe_count",
+    "wildcard_rrtypes_tested",
+    "wildcard_signature_matched",
+    "wildcard_differentiation_reason",
+]
+
+# Diagnostics CSV extends findings columns with §8-only wildcard fields (R4b).
+DIAGNOSTICS_CSV_COLUMNS = [
+    *CSV_COLUMNS,
+    "matched_rrtype",
+    "matched_values",
+    "diagnostic_reason",
 ]
 
 SUMMARY_COLUMNS = [
@@ -422,6 +468,13 @@ FINDINGS_XLSX_COLUMN_KEYS = [
     "wordlist_sources",
     "notes",
     "scan_timestamp",
+    # §7 wildcard attestation columns (R4b)
+    "wildcard_attestation_status",
+    "wildcard_parent_scope",
+    "wildcard_probe_count",
+    "wildcard_rrtypes_tested",
+    "wildcard_signature_matched",
+    "wildcard_differentiation_reason",
 ]
 
 FINDINGS_HEADER_LABELS = {
@@ -446,9 +499,35 @@ FINDINGS_HEADER_LABELS = {
     "error": "Error",
     "wordlist_sources": "Wordlist sources",
     "notes": "Notes",
+    # §7 labels (R4b)
+    "wildcard_attestation_status": "Wildcard attestation status",
+    "wildcard_parent_scope": "Wildcard parent scope",
+    "wildcard_probe_count": "Wildcard probe count",
+    "wildcard_rrtypes_tested": "Wildcard RR types tested",
+    "wildcard_signature_matched": "Wildcard signature matched",
+    "wildcard_differentiation_reason": "Wildcard differentiation reason",
 }
 
 FINDINGS_SHEET_COLUMNS = _sheet_columns(FINDINGS_XLSX_COLUMN_KEYS, FINDINGS_HEADER_LABELS)
+
+# Diagnostics XLSX sheet columns: findings columns + §8-only wildcard fields (R4b).
+DIAGNOSTICS_XLSX_COLUMN_KEYS = [
+    *FINDINGS_XLSX_COLUMN_KEYS,
+    "matched_rrtype",
+    "matched_values",
+    "diagnostic_reason",
+]
+
+DIAGNOSTICS_HEADER_LABELS = {
+    **FINDINGS_HEADER_LABELS,
+    "matched_rrtype": "Matched RR type",
+    "matched_values": "Matched values",
+    "diagnostic_reason": "Diagnostic reason",
+}
+
+DIAGNOSTICS_SHEET_COLUMNS = _sheet_columns(
+    DIAGNOSTICS_XLSX_COLUMN_KEYS, DIAGNOSTICS_HEADER_LABELS
+)
 
 ERRORS_WARNINGS_HEADER_LABELS = {
     "scan_timestamp": "Scan timestamp",
@@ -1562,6 +1641,101 @@ def _diagnostic_export_metadata(
     }
 
 
+def _parent_scope_from_fqdn(fqdn: str) -> str:
+    """Strip the first DNS label to derive the enumeration parent scope (§7/§8, R4b)."""
+    parts = fqdn.split(".")
+    return ".".join(parts[1:]) if len(parts) > 1 else fqdn
+
+
+def _wildcard_finding_fields(record: DiscoveredRecord) -> dict[str, str]:
+    """Return the six §7 wildcard attestation fields for a confirmed/diagnostic finding row (R4b).
+
+    Maps internal attestation_status values (clean/detected/inconclusive) to the
+    contract's external strings (wildcard_not_detected/wildcard_detected/wildcard_inconclusive).
+    REASON_NO_WILDCARD is mapped to not_applicable per §7 valid-combinations rule.
+    """
+    att_raw = record.attestation_status or "clean"
+    att_ext = _ATTESTATION_STATUS_EXTERNAL.get(att_raw, "wildcard_not_detected")
+
+    # wildcard_signature_matched: False for CLEAN (signature never matched) and for
+    # DETECTED+differentiated (candidate was promoted despite the wildcard, so the
+    # wildcard signature did NOT ultimately govern the outcome).
+    sig_raw = record.wildcard_signature_matched
+    sig_str = "true" if sig_raw is True else "false"
+
+    # wildcard_differentiation_reason: not_applicable when no wildcard was detected;
+    # also not_applicable when the engine returned REASON_NO_WILDCARD.
+    if att_ext != "wildcard_detected":
+        reason_str = "not_applicable"
+    else:
+        reason_raw = record.wildcard_differentiation_reason
+        if reason_raw is None or reason_raw == REASON_NO_WILDCARD:
+            reason_str = "not_applicable"
+        else:
+            reason_str = reason_raw
+
+    return {
+        "wildcard_attestation_status": att_ext,
+        "wildcard_parent_scope": _parent_scope_from_fqdn(record.fqdn),
+        "wildcard_probe_count": str(MIN_PROBE_COUNT),
+        "wildcard_rrtypes_tested": _WILDCARD_RRTYPES_TESTED,
+        "wildcard_signature_matched": sig_str,
+        "wildcard_differentiation_reason": reason_str,
+    }
+
+
+def _wildcard_outcome_all_fields(outcome: EvidenceOutcome) -> dict[str, str]:
+    """Return §7+§8 wildcard fields for an EvidenceOutcome diagnostic row (R4b).
+
+    Wildcard-specific fields are populated for SUPPRESSED_WILDCARD_MATCH and
+    WITHHELD_WILDCARD_INCONCLUSIVE outcomes; all other outcomes receive empty strings.
+
+    Note: matched_rrtype and matched_values are not populated in R4b because the
+    engine does not store per-record match details on EvidenceOutcome (engine-layer
+    extension out of scope for this ticket; disclosed in acceptance report).
+    """
+    status = outcome.evidence_status
+    parent_scope = _parent_scope_from_fqdn(outcome.fqdn)
+    if status == EvidenceStatus.SUPPRESSED_WILDCARD_MATCH:
+        return {
+            # §7 subset shared with findings
+            "wildcard_attestation_status": "wildcard_detected",
+            "wildcard_parent_scope": parent_scope,
+            "wildcard_probe_count": str(MIN_PROBE_COUNT),
+            "wildcard_rrtypes_tested": _WILDCARD_RRTYPES_TESTED,
+            "wildcard_signature_matched": "true",
+            "wildcard_differentiation_reason": "",
+            # §8 diagnostic-only
+            "matched_rrtype": "",
+            "matched_values": "",
+            "diagnostic_reason": "suppressed_as_wildcard_only",
+        }
+    if status == EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE:
+        return {
+            "wildcard_attestation_status": "wildcard_inconclusive",
+            "wildcard_parent_scope": parent_scope,
+            "wildcard_probe_count": str(MIN_PROBE_COUNT),
+            "wildcard_rrtypes_tested": _WILDCARD_RRTYPES_TESTED,
+            "wildcard_signature_matched": "not_applicable",
+            "wildcard_differentiation_reason": "",
+            "matched_rrtype": "",
+            "matched_values": "",
+            "diagnostic_reason": "wildcard_attestation_inconclusive",
+        }
+    # Non-wildcard outcome — blank all wildcard fields.
+    return {
+        "wildcard_attestation_status": "",
+        "wildcard_parent_scope": "",
+        "wildcard_probe_count": "",
+        "wildcard_rrtypes_tested": "",
+        "wildcard_signature_matched": "",
+        "wildcard_differentiation_reason": "",
+        "matched_rrtype": "",
+        "matched_values": "",
+        "diagnostic_reason": "",
+    }
+
+
 def _evidence_outcome_row(
     domain_result: DomainScanResult,
     outcome: EvidenceOutcome,
@@ -1576,6 +1750,15 @@ def _evidence_outcome_row(
     meta = _diagnostic_export_metadata(
         outcome.fqdn, detail=outcome.detail, known_names=known_names
     )
+    wc_all = _wildcard_outcome_all_fields(outcome)
+    # §9 wording: prepend contract phrasing to the base notes for wildcard outcomes.
+    diag_reason = wc_all["diagnostic_reason"]
+    if diag_reason == "suppressed_as_wildcard_only":
+        outcome_notes = f"{WILDCARD_WORDING_SUPPRESSED} {notes}".strip()
+    elif diag_reason == "wildcard_attestation_inconclusive":
+        outcome_notes = f"{WILDCARD_WORDING_INCONCLUSIVE} {notes}".strip()
+    else:
+        outcome_notes = notes
     return {
         "scan_timestamp": scan_timestamp,
         "base_domain": domain_result.domain,
@@ -1593,7 +1776,8 @@ def _evidence_outcome_row(
         "axfr_status": axfr_status,
         "error": outcome.detail if outcome.evidence_status == EvidenceStatus.INCONCLUSIVE_DNS_FAILURE else "",
         "wordlist_sources": wordlist_sources,
-        "notes": notes,
+        "notes": outcome_notes,
+        **wc_all,  # §7+§8 wildcard fields (R4b)
     }
 
 
@@ -1628,15 +1812,21 @@ def _record_error(record: DiscoveredRecord) -> str:
 
 def _finding_notes(record: DiscoveredRecord, base_notes: str) -> str:
     if record.source_method == "fifth_level_parent_validation":
-        return f"{FIFTH_LEVEL_PARENT_NOTE} {base_notes}".strip()
-    if record.classification in {
+        note = f"{FIFTH_LEVEL_PARENT_NOTE} {base_notes}".strip()
+    elif record.classification in {
         FindingClassification.BASE_ZONE_EXISTS,
         FindingClassification.ZONE_SOA_DISCOVERED,
     }:
-        return f"{SOA_FINDING_NOTE} {base_notes}".strip()
-    if record.classification == FindingClassification.SCAN_ERROR:
-        return f"{SCAN_ERROR_NOTE} {base_notes}".strip()
-    return base_notes
+        note = f"{SOA_FINDING_NOTE} {base_notes}".strip()
+    elif record.classification == FindingClassification.SCAN_ERROR:
+        note = f"{SCAN_ERROR_NOTE} {base_notes}".strip()
+    else:
+        note = base_notes
+    # §9 wildcard attestation wording: prepend contract phrasing when a wildcard
+    # was detected but the candidate differentiated and was promoted (R4b).
+    if record.attestation_status == "detected":
+        note = f"{WILDCARD_WORDING_DETECTED_PROMOTED} {note}".strip()
+    return note
 
 
 def _record_value(record: DiscoveredRecord) -> str:
@@ -1968,6 +2158,7 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
                     "error": _record_error(record),
                     "wordlist_sources": wordlist_sources,
                     "notes": _finding_notes(record, notes),
+                    **_wildcard_finding_fields(record),  # §7 (R4b)
                 }
             )
 
@@ -2022,6 +2213,7 @@ def build_diagnostics_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "error": _record_error(record),
                     "wordlist_sources": wordlist_sources,
                     "notes": _finding_notes(record, notes),
+                    **_wildcard_finding_fields(record),  # §7 (R4b)
                 }
             )
 
@@ -2385,6 +2577,7 @@ def _finding_to_dict(
             "error": record.value,
         }
 
+    wc = _wildcard_finding_fields(record)
     return {
         "tested_name": record.fqdn,
         "record_type": _record_type_text(record) or None,
@@ -2397,6 +2590,15 @@ def _finding_to_dict(
         "ttl": record.ttl,
         "error": None,
         "evidence_trace": traces_to_dicts(record.evidence_trace),
+        # §7 wildcard attestation fields (R4b)
+        "wildcard_attestation_status": wc["wildcard_attestation_status"],
+        "wildcard_parent_scope": wc["wildcard_parent_scope"],
+        "wildcard_probe_count": int(MIN_PROBE_COUNT),
+        "wildcard_rrtypes_tested": list(ATTESTATION_PROBE_TYPES),
+        "wildcard_signature_matched": wc["wildcard_signature_matched"],
+        "wildcard_differentiation_reason": wc["wildcard_differentiation_reason"],
+        # §9 wording
+        "wildcard_note": WILDCARD_WORDING_DETECTED_PROMOTED if record.attestation_status == "detected" else "",
     }
 
 
@@ -2466,6 +2668,14 @@ def build_json_document(result: ScanRunResult) -> dict:
                 findings.append(item)
 
         for outcome in domain_result.evidence_outcomes:
+            wc_all = _wildcard_outcome_all_fields(outcome)
+            diag_reason = wc_all["diagnostic_reason"]
+            if diag_reason == "suppressed_as_wildcard_only":
+                wc_note = WILDCARD_WORDING_SUPPRESSED
+            elif diag_reason == "wildcard_attestation_inconclusive":
+                wc_note = WILDCARD_WORDING_INCONCLUSIVE
+            else:
+                wc_note = ""
             evidence_diagnostics.append(
                 {
                     "tested_name": outcome.fqdn,
@@ -2473,6 +2683,17 @@ def build_json_document(result: ScanRunResult) -> dict:
                     "source": _map_source_method(outcome.source_method),
                     "detail": outcome.detail,
                     "evidence_trace": traces_to_dicts(outcome.evidence_trace),
+                    # §8 wildcard diagnostic fields (R4b)
+                    "wildcard_attestation_status": wc_all["wildcard_attestation_status"],
+                    "wildcard_parent_scope": wc_all["wildcard_parent_scope"],
+                    "wildcard_probe_count": int(MIN_PROBE_COUNT) if wc_all["wildcard_probe_count"] else None,
+                    "wildcard_rrtypes_tested": list(ATTESTATION_PROBE_TYPES) if wc_all["wildcard_rrtypes_tested"] else None,
+                    "wildcard_signature_matched": wc_all["wildcard_signature_matched"],
+                    "matched_rrtype": wc_all["matched_rrtype"] or None,
+                    "matched_values": wc_all["matched_values"] or None,
+                    "diagnostic_reason": diag_reason or None,
+                    # §9 wording
+                    "wildcard_note": wc_note,
                 }
             )
 
@@ -2772,11 +2993,21 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
                 "error": "",
                 "wordlist_sources": "",
                 "notes": "",
+                # §7+§8 wildcard columns present but blank on the placeholder row
+                "wildcard_attestation_status": "",
+                "wildcard_parent_scope": "",
+                "wildcard_probe_count": "",
+                "wildcard_rrtypes_tested": "",
+                "wildcard_signature_matched": "",
+                "wildcard_differentiation_reason": "",
+                "matched_rrtype": "",
+                "matched_values": "",
+                "diagnostic_reason": "",
             }
         ]
     _write_table_sheet(
         diagnostics_sheet,
-        FINDINGS_SHEET_COLUMNS,
+        DIAGNOSTICS_SHEET_COLUMNS,
         diagnostics_rows,
         wrap_column_keys={"value", "why", "notes", "error"},
     )
@@ -2836,7 +3067,9 @@ def export_diagnostics_csv(result: ScanRunResult, output_dir: Path) -> Path:
     rows = build_diagnostics_rows(result)
 
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer = csv.DictWriter(
+            handle, fieldnames=DIAGNOSTICS_CSV_COLUMNS, extrasaction="ignore"
+        )
         writer.writeheader()
         writer.writerows(rows)
 
