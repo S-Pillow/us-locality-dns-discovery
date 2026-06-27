@@ -23,9 +23,11 @@ import dns.zone
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response
 from scanner.evidence_status import (
+    is_confirmed_evidence_status,
     outcome_candidate_tested,
     outcome_ignored_unrelated_authority,
     outcome_inconclusive_dns_failure,
+    resolve_evidence_status,
     stamp_record_evidence_status,
 )
 from scanner.evidence_trace import (
@@ -2285,12 +2287,23 @@ def run_scan(
 
     cancelled = bool(cancel_check and cancel_check())
     result.cancelled = cancelled
-    result.partial = cancelled and len(result.domain_results) < len(domain_names)
+
+    # partial_results=True for any cancellation: the operator interrupted the scan,
+    # so results are partial regardless of how many domains had started.
+    # This covers single-domain and last-domain mid-scan cancels.
+    result.partial = cancelled
+
     result.scan_status = ScanStatus.CANCELLED if cancelled else ScanStatus.COMPLETED
 
-    total_records = sum(len(item.records) for item in result.domain_results)
     total_candidates = sum(item.candidates_tested for item in result.domain_results)
     wildcard_domains = [item.domain for item in result.domain_results if item.wildcard_suspected]
+
+    total_confirmed = sum(
+        1
+        for item in result.domain_results
+        for record in item.records
+        if is_confirmed_evidence_status(resolve_evidence_status(record, item.domain))
+    )
 
     if cancelled:
         _emit("=== Scan cancelled ===", progress_callback, messages)
@@ -2300,7 +2313,7 @@ def run_scan(
 
     _emit(
         f"Domains scanned: {len(result.domain_results)} of {len(domain_names)}; "
-        f"total findings: {total_records}; "
+        f"confirmed findings: {total_confirmed}; "
         f"candidates tested: {total_candidates}; "
         f"elapsed: {result.elapsed_seconds:.1f}s",
         progress_callback,

@@ -21,11 +21,11 @@ from scanner.version import (
     APP_VERSION,
     EVIDENCE_MODEL_VERSION,
     SOURCE_BUILD_LABEL,
-    SOURCE_COMMIT,
+    get_source_commit,
 )
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.input_loader import PREFERRED_INPUT_FORMAT_NOTE, RECOMMENDED_INPUT_COLUMNS_CSV
-from scanner.evidence_status import resolve_evidence_status
+from scanner.evidence_status import is_confirmed_evidence_status, resolve_evidence_status
 from scanner.evidence_trace import traces_to_dicts
 from scanner.models import (
     DiscoveredRecord,
@@ -273,6 +273,7 @@ SUMMARY_COLUMNS = [
     "base_zone_exists",
     "candidate_names_tested",
     "wordlist_sources",
+    "source_commit",
     "analysis_note",
     "limitation_note",
 ]
@@ -392,6 +393,7 @@ SUMMARY_HEADER_LABELS = {
     "base_zone_exists": "Base zone exists",
     "candidate_names_tested": "Candidate names tested",
     "wordlist_sources": "Wordlist sources",
+    "source_commit": "Source commit",
     "analysis_note": "Analysis note",
     "limitation_note": "Limitation note",
 }
@@ -475,6 +477,7 @@ class ExportOutcome:
 
     xlsx_path: Path | None = None
     csv_path: Path | None = None
+    diagnostics_csv_path: Path | None = None
     json_path: Path | None = None
     summary_csv_path: Path | None = None
     row_count: int = 0
@@ -1400,7 +1403,10 @@ def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
     base_has_zone = False
 
     for record in domain_result.records:
-        counts["total_findings"] += 1
+        if is_confirmed_evidence_status(
+            resolve_evidence_status(record, domain_result.domain)
+        ):
+            counts["total_findings"] += 1
         key_map = {
             FindingClassification.BASE_DOMAIN_RECORD: "base_domain_records",
             FindingClassification.BASE_ZONE_EXISTS: "base_zone_exists",
@@ -1525,14 +1531,31 @@ def _include_record_in_export(record: DiscoveredRecord, base_domain: str) -> boo
     return True
 
 
+def _known_names_for_domain(domain_result: DomainScanResult) -> frozenset[str]:
+    """Return normalized known child-domain names from the domain's input record."""
+    if domain_result.input_record is None:
+        return frozenset()
+    return frozenset(
+        normalize_domain_name(n)
+        for n in known_child_domains_from_record(domain_result.input_record)
+        if n
+    )
+
+
 def _diagnostic_export_metadata(
     fqdn: str,
     *,
     detail: str,
+    known_names: frozenset[str] | set[str] | None = None,
 ) -> dict[str, str]:
+    known_domain = (
+        "yes"
+        if known_names and normalize_domain_name(fqdn) in known_names
+        else "no"
+    )
     return {
         "discovered_name": "",
-        "known_domain": "no",
+        "known_domain": known_domain,
         "name_type": "diagnostic",
         "evidence_value": "context_only",
         "why": detail or "Diagnostic evidence status only; not a confirmed finding",
@@ -1548,8 +1571,11 @@ def _evidence_outcome_row(
     axfr_status: str,
     wildcard: str,
     notes: str,
+    known_names: frozenset[str] | None = None,
 ) -> dict[str, str]:
-    meta = _diagnostic_export_metadata(outcome.fqdn, detail=outcome.detail)
+    meta = _diagnostic_export_metadata(
+        outcome.fqdn, detail=outcome.detail, known_names=known_names
+    )
     return {
         "scan_timestamp": scan_timestamp,
         "base_domain": domain_result.domain,
@@ -1665,7 +1691,7 @@ def _determine_scan_status(domain_result: DomainScanResult, counts: dict[str, in
         if has_meaningful or domain_result.candidates_tested > 0:
             return SCAN_STATUS_INCOMPLETE
         return SCAN_STATUS_INCOMPLETE if domain_result.scan_failed else SCAN_STATUS_ERRORS_ONLY
-    if counts["query_errors"] > 0 and counts["total_findings"] == counts["query_errors"]:
+    if counts["query_errors"] > 0 and counts["total_findings"] == 0:
         return SCAN_STATUS_ERRORS_ONLY
     return SCAN_STATUS_NO_RECORDS
 
@@ -1843,6 +1869,7 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
             )
 
         for outcome in domain_result.evidence_outcomes:
+            known_names = _known_names_for_domain(domain_result)
             rows.append(
                 _evidence_outcome_row(
                     domain_result,
@@ -1852,10 +1879,172 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     axfr_status=axfr_status,
                     wildcard=wildcard,
                     notes=notes,
+                    known_names=known_names,
                 )
             )
 
     return rows
+
+
+def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]:
+    """Return only confirmed-finding rows — the Findings sheet/CSV contract.
+
+    A row appears here only when ``is_confirmed_evidence_status`` returns True
+    for the record's resolved evidence status.  EvidenceOutcome diagnostic rows,
+    QUERY_ERROR, AXFR_BLOCKED, and NOT_RECORDED rows are excluded.
+    """
+    rows: list[dict[str, str]] = []
+    scan_timestamp = _format_timestamp(result.scan_timestamp)
+    wordlist_sources = _wordlist_sources_text(result)
+    axfr_enabled = result.input.options.attempt_axfr
+    notes = _export_notes(result)
+
+    for domain_result in result.domain_results:
+        axfr_status = _domain_axfr_status(domain_result, axfr_enabled)
+        wildcard = "true" if domain_result.wildcard_suspected else "false"
+        counts = _domain_summary_counts(domain_result)
+        comparison = _compare_known_vs_discovered(domain_result)
+
+        if _should_emit_no_records_row(domain_result, counts):
+            domain_why = _why_for_domain_summary(
+                str(comparison.get("evidence_value", "none")),
+                comparison,
+                scan_failed=_domain_has_scan_error(domain_result),
+            )
+            rows.append(
+                {
+                    "scan_timestamp": scan_timestamp,
+                    "base_domain": domain_result.domain,
+                    "discovered_name": domain_result.domain,
+                    "known_domain": "yes",
+                    "name_type": "base_domain",
+                    "evidence_value": str(comparison.get("evidence_value", "none")),
+                    "why": domain_why,
+                    "tested_name": domain_result.domain,
+                    "record_type": "",
+                    "finding_type": FindingClassification.NO_RECORDS_DISCOVERED.value,
+                    "evidence_status": EvidenceStatus.NOT_RECORDED.value,
+                    "confidence": "unknown",
+                    "source": "recursive",
+                    "nameserver": "",
+                    "value": "No records discovered using tested methods",
+                    "ttl": "",
+                    "wildcard_suspected": wildcard,
+                    "axfr_status": axfr_status,
+                    "error": "",
+                    "wordlist_sources": wordlist_sources,
+                    "notes": notes,
+                }
+            )
+
+        for record in domain_result.records:
+            if not _include_record_in_export(record, domain_result.domain):
+                continue
+            status = resolve_evidence_status(record, domain_result.domain)
+            if not is_confirmed_evidence_status(status):
+                continue
+            child_meta = _finding_child_metadata(
+                domain_result,
+                record.fqdn,
+                comparison,
+                record=record,
+            )
+            rows.append(
+                {
+                    "scan_timestamp": scan_timestamp,
+                    "base_domain": domain_result.domain,
+                    **child_meta,
+                    "tested_name": record.fqdn,
+                    "record_type": _record_type_text(record),
+                    "finding_type": record.classification.value,
+                    "evidence_status": status.value,
+                    "confidence": _map_confidence(record.confidence),
+                    "source": _map_source(record),
+                    "nameserver": record.nameserver or "",
+                    "value": _record_value(record),
+                    "ttl": "" if record.ttl is None else str(record.ttl),
+                    "wildcard_suspected": wildcard,
+                    "axfr_status": axfr_status,
+                    "error": _record_error(record),
+                    "wordlist_sources": wordlist_sources,
+                    "notes": _finding_notes(record, notes),
+                }
+            )
+
+    return rows
+
+
+def build_diagnostics_rows(result: ScanRunResult) -> list[dict[str, str]]:
+    """Return diagnostic rows only — EvidenceOutcomes and non-confirmed records.
+
+    These rows must never appear on the Findings sheet or confirmed-findings CSV.
+    """
+    rows: list[dict[str, str]] = []
+    scan_timestamp = _format_timestamp(result.scan_timestamp)
+    wordlist_sources = _wordlist_sources_text(result)
+    axfr_enabled = result.input.options.attempt_axfr
+    notes = _export_notes(result)
+
+    for domain_result in result.domain_results:
+        axfr_status = _domain_axfr_status(domain_result, axfr_enabled)
+        wildcard = "true" if domain_result.wildcard_suspected else "false"
+        comparison = _compare_known_vs_discovered(domain_result)
+        known_names = _known_names_for_domain(domain_result)
+
+        for record in domain_result.records:
+            if not _include_record_in_export(record, domain_result.domain):
+                continue
+            status = resolve_evidence_status(record, domain_result.domain)
+            if is_confirmed_evidence_status(status):
+                continue
+            child_meta = _finding_child_metadata(
+                domain_result,
+                record.fqdn,
+                comparison,
+                record=record,
+            )
+            rows.append(
+                {
+                    "scan_timestamp": scan_timestamp,
+                    "base_domain": domain_result.domain,
+                    **child_meta,
+                    "tested_name": record.fqdn,
+                    "record_type": _record_type_text(record),
+                    "finding_type": record.classification.value,
+                    "evidence_status": status.value,
+                    "confidence": _map_confidence(record.confidence),
+                    "source": _map_source(record),
+                    "nameserver": record.nameserver or "",
+                    "value": _record_value(record),
+                    "ttl": "" if record.ttl is None else str(record.ttl),
+                    "wildcard_suspected": wildcard,
+                    "axfr_status": axfr_status,
+                    "error": _record_error(record),
+                    "wordlist_sources": wordlist_sources,
+                    "notes": _finding_notes(record, notes),
+                }
+            )
+
+        for outcome in domain_result.evidence_outcomes:
+            rows.append(
+                _evidence_outcome_row(
+                    domain_result,
+                    outcome,
+                    scan_timestamp=scan_timestamp,
+                    wordlist_sources=wordlist_sources,
+                    axfr_status=axfr_status,
+                    wildcard=wildcard,
+                    notes=notes,
+                    known_names=known_names,
+                )
+            )
+
+    return rows
+
+
+def build_findings_rows(result: ScanRunResult) -> list[dict[str, str]]:
+    """Confirmed findings only — for Findings sheet and confirmed-findings CSV."""
+    return build_confirmed_findings_rows(result)
 
 
 def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
@@ -1904,6 +2093,7 @@ def build_summary_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "base_zone_exists": "true" if counts["base_zone_exists_flag"] else "false",
                 "candidate_names_tested": str(counts["candidates_tested"]),
                 "wordlist_sources": wordlist_sources,
+                "source_commit": get_source_commit(),
                 "analysis_note": _analysis_note(domain_result, counts, scan_status, comparison),
                 "limitation_note": _limitation_note(result),
             }
@@ -1940,7 +2130,7 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("packaged_mode", str(is_frozen()).lower()),
         ("app_version", APP_VERSION or ""),
         ("source_build_label", SOURCE_BUILD_LABEL),
-        ("source_commit", SOURCE_COMMIT),
+        ("source_commit", get_source_commit()),
         ("scan_profile", options.scan_profile.value),
         ("evidence_model_version", EVIDENCE_MODEL_VERSION),
         ("child_domain_discovery_goal", CHILD_DOMAIN_DISCOVERY_GOAL),
@@ -2226,6 +2416,7 @@ def build_json_document(result: ScanRunResult) -> dict:
         "scan_cancelled": result.cancelled,
         "partial_results": result.partial,
         "elapsed_seconds": result.elapsed_seconds,
+        "source_commit": get_source_commit(),
         "discovery_limitation": DISCOVERY_LIMITATION,
         "context_limitation": CONTEXT_LIMITATION,
         "partial_scan_note": PARTIAL_SCAN_NOTE if result.partial or result.cancelled else "",
@@ -2547,12 +2738,47 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     )
 
     findings_sheet = workbook.create_sheet("Findings")
-    findings_rows = [_coworker_display_row(row) for row in build_findings_rows(result)]
+    findings_rows = [_coworker_display_row(row) for row in build_confirmed_findings_rows(result)]
     _write_table_sheet(
         findings_sheet,
         FINDINGS_SHEET_COLUMNS,
         findings_rows,
         wrap_column_keys={"value", "why", "notes", "error", "nameserver"},
+    )
+
+    diagnostics_sheet = workbook.create_sheet("Diagnostics")
+    diagnostics_rows = [_coworker_display_row(row) for row in build_diagnostics_rows(result)]
+    if not diagnostics_rows:
+        diagnostics_rows = [
+            {
+                "scan_timestamp": _format_timestamp(result.scan_timestamp),
+                "base_domain": "",
+                "discovered_name": "",
+                "known_domain": "",
+                "name_type": "diagnostic",
+                "evidence_value": "",
+                "why": "No diagnostic evidence outcomes recorded for this scan.",
+                "tested_name": "",
+                "record_type": "",
+                "finding_type": "",
+                "evidence_status": "",
+                "confidence": "",
+                "source": "",
+                "nameserver": "",
+                "value": "",
+                "ttl": "",
+                "wildcard_suspected": "",
+                "axfr_status": "",
+                "error": "",
+                "wordlist_sources": "",
+                "notes": "",
+            }
+        ]
+    _write_table_sheet(
+        diagnostics_sheet,
+        FINDINGS_SHEET_COLUMNS,
+        diagnostics_rows,
+        wrap_column_keys={"value", "why", "notes", "error"},
     )
 
     settings_sheet = workbook.create_sheet("Scan Settings")
@@ -2590,10 +2816,10 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
 
 
 def export_csv(result: ScanRunResult, output_dir: Path) -> tuple[Path, int]:
-    """Write findings CSV report and return path plus row count."""
+    """Write confirmed-findings CSV and return path plus row count."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{_findings_report_stem(result.scan_timestamp)}.csv"
-    rows = build_csv_rows(result)
+    rows = build_confirmed_findings_rows(result)
 
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
@@ -2601,6 +2827,20 @@ def export_csv(result: ScanRunResult, output_dir: Path) -> tuple[Path, int]:
         writer.writerows(rows)
 
     return path, len(rows)
+
+
+def export_diagnostics_csv(result: ScanRunResult, output_dir: Path) -> Path:
+    """Write diagnostics-only CSV (separate from the confirmed-findings CSV)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{_findings_report_stem(result.scan_timestamp)}_diagnostics.csv"
+    rows = build_diagnostics_rows(result)
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return path
 
 
 def export_summary_csv(result: ScanRunResult, output_dir: Path) -> Path:
@@ -2647,6 +2887,7 @@ def export_results(
 
     if export_format in {"csv", "all"}:
         outcome.csv_path, _ = export_csv(result, output_dir)
+        outcome.diagnostics_csv_path = export_diagnostics_csv(result, output_dir)
 
     if export_format in {"json", "all"}:
         outcome.json_path = export_json(result, output_dir)
