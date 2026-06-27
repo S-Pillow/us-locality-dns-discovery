@@ -312,8 +312,15 @@ class DiscoveredRecord:
     ttl: Optional[int] = None
     evidence_status: EvidenceStatus | None = None
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
-    # Per-parent wildcard attestation status attached at testing time (R4a).
+    # Per-parent wildcard attestation fields (R4a).  R4b surfaces these in exports.
     attestation_status: str | None = None
+    wildcard_signature_matched: bool | None = None
+    """False when the candidate differentiated from the wildcard; None when no
+    wildcard was detected or the field has not been evaluated."""
+    wildcard_differentiation_reason: str | None = None
+    """Named differentiation reason (distinct_rrtype | distinct_answer |
+    distinct_cname_target | candidate_ns_soa | verified_delegation) when the
+    candidate promoted despite a DETECTED wildcard at its enumeration parent."""
 
 
 @dataclass

@@ -1661,9 +1661,14 @@ def _test_candidates(
                 ] + list(other_findings)
 
                 if attestation.status == WildcardAttestationStatus.DETECTED:
-                    if not candidate_differentiates(all_candidate_evidence, attestation):
+                    # candidate_differentiates now returns the named reason (str) or
+                    # None on non-differentiation — §7 forward-compat.
+                    differentiation_reason = candidate_differentiates(
+                        all_candidate_evidence, attestation
+                    )
+                    if not differentiation_reason:
                         # Response matches wildcard signature — suppress to diagnostic.
-                        # Gate code path: candidate_differentiates returned False,
+                        # Gate code path: candidate_differentiates returned None,
                         # so the promotion branch is not taken and the outcome below
                         # routes the candidate to the diagnostics sheet via T31 routing.
                         result.evidence_outcomes.append(
@@ -1678,9 +1683,13 @@ def _test_candidates(
                         other_findings = []
                         wildcard_gate_applied = True
                     else:
-                        # Differentiates from wildcard — stamp status, promote normally.
+                        # Differentiates — stamp attestation status + reason (§7).
+                        # wildcard_signature_matched=False: signature did NOT match
+                        # (candidate differentiated); reason explains how.
                         for item in other_findings:
                             item.attestation_status = attestation.status.value
+                            item.wildcard_signature_matched = False
+                            item.wildcard_differentiation_reason = differentiation_reason
                 elif attestation.status == WildcardAttestationStatus.INCONCLUSIVE:
                     # Withhold: Light default; Deep-mode override is deferred (§3).
                     result.evidence_outcomes.append(
