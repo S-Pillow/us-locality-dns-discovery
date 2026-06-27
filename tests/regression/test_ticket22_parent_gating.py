@@ -17,8 +17,11 @@ import dns.rdatatype
 import dns.rcode
 import dns.rrset
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
 
 from scanner.export_service import build_csv_rows, build_summary_rows
 from scanner.models import (
@@ -351,7 +354,7 @@ def test_scenario_f_ticket20_unrelated_authority() -> None:
 
 
 def _run_regression(script_name: str) -> None:
-    script = PROJECT_ROOT / "output" / script_name
+    script = LEGACY_OUTPUT_DIR / script_name
     proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, check=False)
     if proc.returncode != 0:
         print(proc.stdout)

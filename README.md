@@ -441,6 +441,9 @@ us_locality_dns_discovery/
 │   ├── schools_libraries.txt
 │   └── delegated_manager_clues.txt
 ├── output/
+├── tests/
+│   └── regression/
+├── RELEASE.md
 ├── USLocalityDNSDiscovery.spec
 ├── build_exe.bat
 ├── README.md
@@ -456,3 +459,6 @@ us_locality_dns_discovery/
 ## License / use
 
 Internal prototype. Not approved for merge or deployment.
+
+For source vs packaged EXE workflow, regression tests, and release steps, see
+[RELEASE.md](RELEASE.md).

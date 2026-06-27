@@ -15,6 +15,14 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from scanner.paths import is_frozen
+from scanner.version import (
+    APP_DISPLAY_NAME,
+    APP_NAME,
+    APP_VERSION,
+    EVIDENCE_MODEL_VERSION,
+    SOURCE_BUILD_LABEL,
+    SOURCE_COMMIT,
+)
 from scanner.input_loader import known_child_domains_from_record, normalize_domain_name
 from scanner.input_loader import PREFERRED_INPUT_FORMAT_NOTE, RECOMMENDED_INPUT_COLUMNS_CSV
 from scanner.models import (
@@ -33,9 +41,7 @@ from scanner.scan_engine import (
     DNS_TIMEOUT,
 )
 
-APP_NAME = ".US Locality DNS Discovery Tool"
-APP_VERSION = None
-EVIDENCE_MODEL_VERSION = "2.0-child-domain-discovery"
+APP_NAME = APP_DISPLAY_NAME
 CHILD_DOMAIN_DISCOVERY_GOAL = (
     "For each known 3rd-level domain in the input, find child DNS names beneath it "
     "that are not already known in the system."
@@ -1851,6 +1857,9 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("export_timestamp", _format_timestamp(result.finished_at or result.scan_timestamp)),
         ("output_folder", str(result.input.output_dir.resolve()) if result.input.output_dir else ""),
         ("packaged_mode", str(is_frozen()).lower()),
+        ("app_version", APP_VERSION or ""),
+        ("source_build_label", SOURCE_BUILD_LABEL),
+        ("source_commit", SOURCE_COMMIT),
         ("scan_profile", options.scan_profile.value),
         ("evidence_model_version", EVIDENCE_MODEL_VERSION),
         ("child_domain_discovery_goal", CHILD_DOMAIN_DISCOVERY_GOAL),

@@ -19,8 +19,11 @@ import dns.rdataclass
 import dns.rdatatype
 import dns.rcode
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.export_service import build_csv_rows
@@ -522,7 +525,7 @@ def _run_regression(script: Path) -> None:
         [sys.executable, str(script)],
         capture_output=True,
         text=True,
-        cwd=PROJECT_ROOT,
+        cwd=REPO_ROOT,
     )
     if proc.returncode != 0:
         print(f"REGRESSION FAIL: {script.name}\n{proc.stdout}\n{proc.stderr}")
@@ -558,7 +561,7 @@ def main() -> None:
     test_log_shape_verified_and_ignored()
 
     print("\n-- Prior regression chain --")
-    _run_regression(PROJECT_ROOT / "output" / "_ticket23_verify.py")
+    _run_regression(REGRESSION_DIR / "test_ticket23_dns_classifier.py")
 
     print("\n=== Ticket 24 verification PASSED ===")
 

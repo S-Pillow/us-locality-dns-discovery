@@ -23,8 +23,11 @@ import dns.rdatatype
 import dns.rcode
 import dns.rrset
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from tests.regression._paths import LEGACY_OUTPUT_DIR, REGRESSION_DIR, REPO_ROOT
 
 from scanner.delegation_verifier import verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response, is_no_finding_class
@@ -850,7 +853,7 @@ def _run_regression(script_path: Path) -> None:
         [sys.executable, str(script_path)],
         capture_output=True,
         text=True,
-        cwd=PROJECT_ROOT,
+        cwd=REPO_ROOT,
     )
     output = result.stdout + result.stderr
     if result.returncode != 0:
@@ -913,7 +916,7 @@ def main() -> None:
     test_known_good_log_diagnostic_for_unrelated_authority()
 
     print("\n-- Section 6: Prior regression chain --")
-    _run_regression(PROJECT_ROOT / "output" / "_ticket22_verify.py")
+    _run_regression(REGRESSION_DIR / "test_ticket22_parent_gating.py")
 
     print("\n=== Ticket 23 verification PASSED ===")
 
