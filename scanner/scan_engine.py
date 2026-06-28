@@ -115,7 +115,16 @@ CANDIDATE_RECORD_TYPES = (
     RecordType.CNAME,
 )
 
-FIFTH_LEVEL_BRANCHES = ("ci", "co")
+# RFC 1480 geographic-locality branches used for broad 5th-level generation.
+# Produces <label>.<branch>.<locality> candidates (e.g. fcs.pvt.k12.pa.us).
+# Only fires when include_rfc_locality_baseline is True (NORMAL/DEEP); Light is
+# unaffected because the fifth_level_enabled gate stays False in that profile.
+#
+# Included (7): ci=city, co=county, k12=school district, cc=community college,
+#               tec=vocational-tech, pvt=private school, lib=public library.
+# Excluded: state, dni, isa, nsn, fed (federal/state-level, not locality branches),
+#           gen (generic, no clear US-locality evidence), mus (museum, archaic).
+FIFTH_LEVEL_BRANCHES: tuple[str, ...] = ("ci", "co", "k12", "cc", "tec", "pvt", "lib")
 FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
 KNOWN_CHILD_APEX_SOURCE = "known_child_apex_delegation"
 WILDCARD_PROBE_COUNT = 2
@@ -585,7 +594,14 @@ def generate_fourth_level_candidates(base_domain: str, plan: WordlistPlan) -> li
 
 
 def generate_broad_fifth_level_candidates(base_domain: str, plan: WordlistPlan) -> list[str]:
-    """Build limited ci/co 5th-level candidates when RFC baseline is enabled."""
+    """Build RFC-locality 5th-level candidates when RFC baseline is enabled.
+
+    Generates ``<prefix>.<branch>.<base_domain>`` for every combination of
+    prefix label (from ``plan.fifth_level_prefix_labels``) and RFC 1480
+    locality branch (``FIFTH_LEVEL_BRANCHES``).  Only runs when
+    ``plan.fifth_level_enabled`` is True (requires ``include_rfc_locality_baseline``
+    — always False in the Light profile).
+    """
     if not plan.fifth_level_enabled:
         return []
     base = _query_name(base_domain)
