@@ -87,6 +87,12 @@ DNS_LIFETIME = 5.0
 # (UDP timeout + TCP timeout = 2 × DNS_TIMEOUT = 6s).  We add a 1-second
 # margin to absorb event-loop scheduling jitter without masking real hangs.
 PER_CANDIDATE_ASYNC_BUDGET = DNS_TIMEOUT * 2 + 1.0
+# 29C: wall-clock budget for the delegation verifier's authoritative Paths 1/2
+# per candidate.  When exceeded, Path 3 (recursive) still runs outside the cap.
+# Set from Step-1 measurement: Path-3-floor = 0.13s; fast IPv4 auth = 0.07s/IP.
+# Budget of 2.0s gives each attempt min(3.0s, remaining/2) = 1.0s per UDP+TCP,
+# allowing one auth NS to respond before falling through to recursive.
+AUTH_VERIFIER_BUDGET_SECONDS: float = 2.0
 CANDIDATE_WARN_THRESHOLD = 250
 CANDIDATE_STRONG_WARN_THRESHOLD = 500
 
@@ -800,6 +806,7 @@ def _validate_fourth_level_parent(
         log_sink=messages,
         recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
         unreachable_ns_ips=unreachable_ns_ips,
+        auth_budget_seconds=AUTH_VERIFIER_BUDGET_SECONDS,
     )
     result.evidence_outcomes.extend(delegation.evidence_outcomes)
     ns_findings = [
@@ -1055,10 +1062,14 @@ def _send_dns_query(
 
     query = dns.message.make_query(qname, record_type.value)
     last_error: str | None = None
+    # 29C: honour resolver.timeout so the delegation verifier can scale it down
+    # to honour the per-candidate auth budget.  Falls back to DNS_TIMEOUT when
+    # resolver.timeout is not set (e.g. system resolver without explicit timeout).
+    query_timeout = getattr(resolver, "timeout", DNS_TIMEOUT)
     for nameserver in resolver.nameservers:
         for query_fn in (dns.query.udp, dns.query.tcp):
             try:
-                return query_fn(query, nameserver, timeout=DNS_TIMEOUT), None
+                return query_fn(query, nameserver, timeout=query_timeout), None
             except dns.exception.Timeout:
                 last_error = f"{fqdn} {record_type.value}: timeout via {nameserver}"
             except OSError as exc:
@@ -1920,6 +1931,7 @@ def _test_candidates(
                     log_sink=messages,
                     recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
                     unreachable_ns_ips=unreachable_ns_ips,
+                    auth_budget_seconds=AUTH_VERIFIER_BUDGET_SECONDS,
                 )
             else:
                 # No delegation signal — skip the auth-server NS walk entirely.
@@ -2326,6 +2338,11 @@ def scan_domain(
         else:
             _emit(f"  Authoritative nameservers discovered: {', '.join(ns_hosts)}", progress, messages)
 
+        # 29B: per-run auth-NS reachability cache — initialised here (before the base
+        # sweep) so the base sweep can both read and populate it.  The same set is
+        # threaded through to per-candidate delegation verification below.
+        unreachable_ns_ips: set[str] = set()
+
         if resolved_options.query_authoritative_ns and ns_hosts:
             for ns_host in ns_hosts:
                 ns_ips = _resolve_nameserver_ips(ns_host)
@@ -2451,11 +2468,8 @@ def scan_domain(
     # re-discovers the same parent's NS hosts from scratch.
     parent_ns_cache: dict[str, list[str]] = {_display_name(domain): list(ns_hosts)}
     ns_ip_cache: dict[str, list[str]] = {}
-    # 29B: per-run auth-NS reachability cache — NS IPs that returned an instant
-    # network-unreachable OSError are recorded here so the same query is never
-    # re-issued per candidate.  Only ENETUNREACH/WSAENETUNREACH shape entries;
-    # timeout/SERVFAIL are not cached (they are real DNS conditions).
-    unreachable_ns_ips: set[str] = set()
+    # unreachable_ns_ips is initialised earlier (before the base auth sweep) so
+    # that sweep can populate it; the same set is used here for per-candidate work.
     _emit(
         f"  Candidate names to test: {len(fourth_candidates)} 4th-level, "
         f"{len(fifth_candidates)} 5th-level ({candidate_total} total)",
