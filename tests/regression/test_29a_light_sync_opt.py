@@ -133,6 +133,11 @@ def _send_no_signal(fqdn: str, record_type: RecordType, resolver) -> tuple:
     return _nxdomain(fqdn, record_type.value)
 
 
+async def _async_send_no_signal(fqdn: str, record_type: RecordType, resolver) -> tuple:
+    """Async wrapper of _send_no_signal for patching _async_send_dns_query (Ticket 29)."""
+    return _send_no_signal(fqdn, record_type, resolver)
+
+
 def _send_with_signal(fqdn: str, record_type: RecordType, resolver) -> tuple:
     """CANDIDATE_WITH_SIGNAL returns SOA (zone apex); others return A or NXDOMAIN.
     Only the delegated candidate has a SOA → produces ZONE_SOA_DISCOVERED."""
@@ -145,6 +150,11 @@ def _send_with_signal(fqdn: str, record_type: RecordType, resolver) -> tuple:
         _add_answer_a(r, fqdn, "2.3.4.5")
         return r, None
     return _nxdomain(fqdn, record_type.value)
+
+
+async def _async_send_with_signal(fqdn: str, record_type: RecordType, resolver) -> tuple:
+    """Async wrapper of _send_with_signal for patching _async_send_dns_query (Ticket 29)."""
+    return _send_with_signal(fqdn, record_type, resolver)
 
 
 def _empty_delegation_result() -> DelegationVerificationResult:
@@ -195,8 +205,12 @@ def _run_candidates(
     result = DomainScanResult(domain=BASE)
     resolver = _make_resolver()
 
+    async def _async_send_fn(fqdn, rt, resolver):
+        return send_fn(fqdn, rt, resolver)
+
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=send_fn),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_fn),
         patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
         patch("scanner.scan_engine._get_parent_ns_hosts", return_value=["ns1.example.com"]),
         patch("scanner.scan_engine.run_wildcard_attestation") as mock_wc,
@@ -332,6 +346,7 @@ def test_na1_skip_no_signal_candidate() -> None:
 
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=_send_no_signal),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_no_signal),
         patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
         patch("scanner.scan_engine._get_parent_ns_hosts", return_value=["ns1.example.com"]),
         patch("scanner.scan_engine.verify_delegated_child_zone", side_effect=_spy_verify),
@@ -397,6 +412,7 @@ def test_na2_walk_with_signal_candidate() -> None:
 
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=_send_with_signal),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_with_signal),
         patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
         patch("scanner.scan_engine._get_parent_ns_hosts", return_value=["ns1.example.com"]),
         patch("scanner.scan_engine.verify_delegated_child_zone", side_effect=_spy_verify),
@@ -472,6 +488,9 @@ def test_na3_parent_ns_cache_correctness() -> None:
             return r, None
         return _nxdomain(fqdn, record_type.value)
 
+    async def _async_send_two_signals(fqdn, rt, resolver):
+        return _send_two_signals(fqdn, rt, resolver)
+
     parent_ns_cache: dict[str, list[str]] = {}
 
     result = DomainScanResult(domain=BASE)
@@ -479,6 +498,7 @@ def test_na3_parent_ns_cache_correctness() -> None:
 
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=_send_two_signals),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_two_signals),
         patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
         patch("scanner.scan_engine._get_parent_ns_hosts", side_effect=_spy_get_parent_ns),
         patch(
@@ -569,6 +589,9 @@ def test_na4_ns_ip_cache_correctness() -> None:
             return r, None
         return _nxdomain(fqdn, record_type.value)
 
+    async def _async_send_two_signals(fqdn, rt, resolver):
+        return _send_two_signals(fqdn, rt, resolver)
+
     # Pre-populate: cache already knows NS_HOST → CACHED_IPS
     ns_ip_cache: dict[str, list[str]] = {NS_HOST: list(CACHED_IPS)}
 
@@ -577,6 +600,7 @@ def test_na4_ns_ip_cache_correctness() -> None:
 
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=_send_two_signals),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_two_signals),
         patch("scanner.scan_engine._resolve_nameserver_ips", side_effect=_spy_resolve_ips),
         patch("scanner.scan_engine._get_parent_ns_hosts", return_value=[NS_HOST]),
         patch(
@@ -653,6 +677,7 @@ def test_na5_finding_parity_a_record_candidate() -> None:
         resolver = _make_resolver()
         with (
             patch("scanner.scan_engine._send_dns_query", side_effect=_send_no_signal),
+            patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_no_signal),
             patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
             patch("scanner.scan_engine._get_parent_ns_hosts", return_value=["ns1.example.com"]),
             # Stub the delegation walk to return empty (simulates pre-29A empty result for no-signal)
@@ -730,6 +755,7 @@ def test_ac2_delegated_candidate_still_confirms() -> None:
 
     with (
         patch("scanner.scan_engine._send_dns_query", side_effect=_send_with_signal),
+        patch("scanner.scan_engine._async_send_dns_query", side_effect=_async_send_with_signal),
         patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]),
         patch("scanner.scan_engine._get_parent_ns_hosts", return_value=["ns1.example.com"]),
         patch(
