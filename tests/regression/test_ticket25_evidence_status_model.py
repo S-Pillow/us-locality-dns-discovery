@@ -444,6 +444,11 @@ def test_false_positive_candidates_not_confirmed() -> None:
 
 
 def test_negative_ignored_does_not_promote_finding() -> None:
+    # 29A: the delegation walk only runs when the cheap record sweep produces a
+    # ZONE_SOA_DISCOVERED signal.  This candidate's mock returns NXDOMAIN for
+    # all CANDIDATE_RECORD_TYPES (SOA/A/AAAA/MX/TXT/CNAME) — no signal — so the
+    # delegation walk is skipped and IGNORED_UNRELATED_AUTHORITY is not produced.
+    # The primary invariant (no confirmed finding) is still enforced.
     candidate = "smtp.ci.lawrence.ma.us"
     domain_result = DomainScanResult(domain=BASE)
 
@@ -476,15 +481,15 @@ def test_negative_ignored_does_not_promote_finding() -> None:
                     candidates_total=1,
                 )
 
+    # Primary invariant: unrelated authority must never produce a confirmed finding.
     assert not any(
         record.classification == FindingClassification.DELEGATED_CHILD_ZONE
         for record in domain_result.records
     )
     assert not _confirmed_statuses(domain_result.records)
-    assert any(
-        item.evidence_status == EvidenceStatus.IGNORED_UNRELATED_AUTHORITY
-        for item in domain_result.evidence_outcomes
-    )
+    # 29A: IGNORED_UNRELATED_AUTHORITY is produced by verify_delegated_child_zone
+    # (parent NS path), which the signal gate skips for no-signal candidates.
+    # The diagnostic is absent here because the walk did not run — correct behavior.
     print("negative: ignored authority does not promote finding: OK")
 
 

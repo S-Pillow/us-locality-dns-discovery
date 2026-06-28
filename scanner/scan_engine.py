@@ -20,7 +20,7 @@ import dns.rdatatype
 import dns.resolver
 import dns.zone
 
-from scanner.delegation_verifier import verify_delegated_child_zone
+from scanner.delegation_verifier import DelegationVerificationResult, verify_delegated_child_zone
 from scanner.dns_classifier import DNSResponseClass, classify_dns_response
 from scanner.evidence_status import (
     is_confirmed_evidence_status,
@@ -644,6 +644,24 @@ def _enumeration_parent(candidate: str) -> str:
     """
     parts = _display_name(candidate).split(".")
     return ".".join(parts[1:]) if len(parts) > 1 else candidate
+
+
+def _has_delegation_signal(findings: list[DiscoveredRecord]) -> bool:
+    """True when *findings* contain ZONE_SOA_DISCOVERED evidence from the record sweep.
+
+    Used by the 29A signal gate: ``verify_delegated_child_zone`` is only invoked
+    for candidates whose cheap system-resolver record sweep already shows SOA evidence
+    at the candidate apex.  Real delegated zones respond with their own SOA when
+    queried via the system resolver; ordinary candidates (A/CNAME/NXDOMAIN) never
+    produce ZONE_SOA_DISCOVERED findings.
+
+    Candidates with no signal — the vast majority of Light-mode candidates —
+    skip the 6-auth-server NS delegation walk entirely, removing ~19 serial
+    queries per candidate (the dominant M1 per-candidate cost).
+
+    Gate condition: ``FindingClassification.ZONE_SOA_DISCOVERED`` in findings.
+    """
+    return any(f.classification == FindingClassification.ZONE_SOA_DISCOVERED for f in findings)
 
 
 def _suppression_match_detail(
@@ -1544,6 +1562,8 @@ def _test_candidates(
     parent_passed: set[str] | None = None,
     parent_decisions: dict[str, ParentGatingDecision] | None = None,
     parent_failed: set[str] | None = None,
+    parent_ns_cache: dict[str, list[str]] | None = None,
+    ns_ip_cache: dict[str, list[str]] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     _ = parent_failed  # legacy verify scripts; decisions cache replaces this set
@@ -1556,6 +1576,15 @@ def _test_candidates(
     parent_skip_counts: dict[str, int] = {}
     if not candidates:
         return tested
+
+    # 29A Change 1: cached NS-IP resolver — memoises _resolve_nameserver_ips
+    # per run so the same NS host is never re-queried across candidates.
+    def _cached_resolve_ns_ips(ns_host: str) -> list[str]:
+        if ns_ip_cache is None:
+            return _resolve_nameserver_ips(ns_host)
+        if ns_host not in ns_ip_cache:
+            ns_ip_cache[ns_host] = _resolve_nameserver_ips(ns_host)
+        return ns_ip_cache[ns_host]
 
     with _PhaseHeartbeat(
         domain=domain,
@@ -1630,16 +1659,54 @@ def _test_candidates(
                             )
                             continue
 
-            delegation = verify_delegated_child_zone(
+            # --- 29A Change 2: cheap record sweep first; delegation walk on signal only ---
+            # Run the system-resolver record sweep unconditionally (cheap: no direct
+            # auth-server contacts, 6 serial queries per candidate).  The delegation
+            # walk's 6-auth-server NS loop fires only when the sweep already shows
+            # zone-apex SOA evidence — the signature of a real child delegation.
+            # Candidates with no SOA evidence skip all ~19 auth-server queries.
+            other_findings, candidate_errors = _query_records(
                 candidate,
-                base_domain=domain,
-                send_query=_send_dns_query,
-                resolve_ns_ips=_resolve_nameserver_ips,
-                make_resolver=_make_resolver,
-                get_parent_ns_hosts=_get_parent_ns_hosts,
+                CANDIDATE_RECORD_TYPES,
+                resolver,
                 source_method="generated_candidate",
+                classification=FindingClassification.STANDARD_RECORD,
+                base_domain=domain,
                 log_sink=messages,
+                evidence_outcomes=result.evidence_outcomes,
             )
+
+            if _has_delegation_signal(other_findings):
+                # Delegation signal: SOA evidence found — run the auth-server walk.
+                # Resolve parent NS from cache (29A Change 1) so the same parent's
+                # NS set is only discovered once per run across all candidates.
+                parent_key = _enumeration_parent(candidate)
+                if parent_ns_cache is not None and parent_key not in parent_ns_cache:
+                    parent_ns_cache[parent_key] = _get_parent_ns_hosts(parent_key)
+                cached_hosts = (
+                    parent_ns_cache.get(parent_key) if parent_ns_cache is not None else None
+                )
+                delegation = verify_delegated_child_zone(
+                    candidate,
+                    base_domain=domain,
+                    send_query=_send_dns_query,
+                    resolve_ns_ips=_cached_resolve_ns_ips,
+                    make_resolver=_make_resolver,
+                    parent_ns_hosts=cached_hosts,
+                    source_method="generated_candidate",
+                    log_sink=messages,
+                )
+            else:
+                # No delegation signal — skip the auth-server NS walk entirely.
+                delegation = DelegationVerificationResult(
+                    verified=False,
+                    method="none",
+                    response_class=None,
+                    reason="no delegation signal in record sweep",
+                    matched_owner=None,
+                    source_path="unknown",
+                )
+
             result.evidence_outcomes.extend(delegation.evidence_outcomes)
             ns_findings = [
                 item
@@ -1664,17 +1731,6 @@ def _test_candidates(
                 _emit(f"    {delegation.log_message}", progress, messages)
             elif delegation.log_message:
                 _emit(f"    {delegation.log_message}", progress, messages)
-
-            other_findings, candidate_errors = _query_records(
-                candidate,
-                CANDIDATE_RECORD_TYPES,
-                resolver,
-                source_method="generated_candidate",
-                classification=FindingClassification.STANDARD_RECORD,
-                base_domain=domain,
-                log_sink=messages,
-                evidence_outcomes=result.evidence_outcomes,
-            )
 
             # --- Wildcard attestation gate (R4a) ---
             # Gate promotion of other_findings against the per-enumeration-parent
@@ -2140,6 +2196,12 @@ def scan_domain(
 
     fourth_candidates, fifth_candidates = generate_all_candidates(domain, plan, input_record)
     candidate_total = len(fourth_candidates) + len(fifth_candidates)
+
+    # 29A Change 1: per-run NS caches — pre-seed parent cache with the
+    # base-domain NS set already discovered above so no candidate ever
+    # re-discovers the same parent's NS hosts from scratch.
+    parent_ns_cache: dict[str, list[str]] = {_display_name(domain): list(ns_hosts)}
+    ns_ip_cache: dict[str, list[str]] = {}
     _emit(
         f"  Candidate names to test: {len(fourth_candidates)} 4th-level, "
         f"{len(fifth_candidates)} 5th-level ({candidate_total} total)",
@@ -2182,6 +2244,8 @@ def scan_domain(
         phase=ScanPhase.TESTING_FOURTH_LEVEL,
         candidates_offset=0,
         candidates_total=candidate_total,
+        parent_ns_cache=parent_ns_cache,
+        ns_ip_cache=ns_ip_cache,
     )
     result.fourth_level_candidates_tested = fourth_tested
 
@@ -2253,6 +2317,8 @@ def scan_domain(
             validate_fifth_level_parents=True,
             parent_passed=parent_passed,
             parent_decisions=parent_decisions,
+            parent_ns_cache=parent_ns_cache,
+            ns_ip_cache=ns_ip_cache,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested
