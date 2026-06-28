@@ -185,6 +185,52 @@ def decide_parent_gating_from_probe_classes(
     )
 
 
+def decision_for_rfc_branch_sentinel_hit(
+    parent_name: str,
+    *,
+    sentinel_hit: str,
+) -> ParentGatingDecision:
+    """RFC branch opened because a sentinel probe found live DNS evidence.
+
+    Tier 4 (Ticket 30): sentinel hit → allow_descendants=True so full 5th-level
+    testing proceeds under this branch.
+    """
+    return ParentGatingDecision(
+        allow_descendants=True,
+        parent_name=parent_name,
+        reason="RFC branch opened by sentinel probe",
+        evidence_status=None,
+        response_class=None,
+        confidence=ParentGatingConfidence.VALIDATED_PARENT,
+        diagnostic_message=(
+            f"RFC branch {parent_name} opened because sentinel probe found live DNS evidence "
+            f"({sentinel_hit}.{parent_name})."
+        ),
+    )
+
+
+def decision_for_rfc_branch_sentinel_miss(parent_name: str) -> ParentGatingDecision:
+    """RFC branch skipped after apex + sentinel probes found no evidence.
+
+    Tier 3 miss (Ticket 30): heuristic-skip disclosure required.  A sentinel miss
+    is NOT proof of absence — it means no tested sentinel name resolved, not that
+    no deeper names exist under the branch.  The diagnostic_message carries the
+    mandatory AIPF disclosure text.
+    """
+    return ParentGatingDecision(
+        allow_descendants=False,
+        parent_name=parent_name,
+        reason="RFC branch skipped by parent-gating heuristic after apex and sentinel checks",
+        evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+        response_class=None,
+        confidence=ParentGatingConfidence.HEURISTIC_SKIP,
+        diagnostic_message=(
+            f"Branch {parent_name} skipped by parent-gating heuristic after apex and sentinel "
+            "checks found no evidence. This is not proof that no deeper names exist."
+        ),
+    )
+
+
 def outcome_from_parent_gating_skip(
     candidate: str,
     decision: ParentGatingDecision,

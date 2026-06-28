@@ -2500,6 +2500,8 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
             (
                 "5th-level parent gating: enabled. "
                 "Deeper names are tested only when their 4th-level parent is known from input or validates in DNS. "
+                "RFC locality branches (ci/co/k12/cc/tec/pvt/lib) that fail apex validation are probed with a "
+                "small sentinel set before being skipped; a heuristic skip is not proof that no deeper names exist. "
                 "Parent names are checked once per scan domain."
                 if plan and (plan.fifth_level_enabled or plan.known_fifth_level_candidates > 0)
                 else ""
