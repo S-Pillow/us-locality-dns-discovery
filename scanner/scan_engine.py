@@ -784,6 +784,7 @@ def _validate_fourth_level_parent(
     wildcard_suspected: bool,
     progress: ProgressCallback | None,
     messages: list[str],
+    unreachable_ns_ips: set[str] | None = None,
 ) -> ParentGatingDecision:
     """Directly test an implied 4th-level parent; return a structured gating decision."""
     added_records = 0
@@ -798,6 +799,7 @@ def _validate_fourth_level_parent(
         source_method=FIFTH_LEVEL_PARENT_SOURCE,
         log_sink=messages,
         recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
+        unreachable_ns_ips=unreachable_ns_ips,
     )
     result.evidence_outcomes.extend(delegation.evidence_outcomes)
     ns_findings = [
@@ -999,6 +1001,24 @@ def _normalize_dns_error_text(error: str) -> str:
     if "unknown error" in lower and "errno" in lower:
         return "network unreachable / socket error"
     return "DNS query error"
+
+
+def _is_unreachable_error(error: str) -> bool:
+    """True for instant OS-level network-unreachable failures (ENETUNREACH / WSAENETUNREACH).
+
+    These are cheap immediate OSError returns, not timeouts.  Only this shape
+    triggers the 29B short-circuit — timeout, SERVFAIL, and REFUSED must not be
+    short-circuited because they are real DNS responses or real network conditions.
+
+    Checks both the normalised form (covers Windows/Linux "network unreachable"
+    variants) and Linux-specific ``[Errno 101]`` which reads "Network is
+    unreachable" rather than the canonical "network unreachable" substring.
+    """
+    normed = _normalize_dns_error_text(error)
+    if normed in ("network unreachable", "network unreachable / socket error"):
+        return True
+    lower = error.lower()
+    return "[errno 101]" in lower
 
 
 def _summarize_auth_ns_query_errors(
@@ -1762,6 +1782,7 @@ def _test_candidates(
     parent_failed: set[str] | None = None,
     parent_ns_cache: dict[str, list[str]] | None = None,
     ns_ip_cache: dict[str, list[str]] | None = None,
+    unreachable_ns_ips: set[str] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     _ = parent_failed  # legacy verify scripts; decisions cache replaces this set
@@ -1844,6 +1865,7 @@ def _test_candidates(
                                     wildcard_suspected=wildcard_suspected,
                                     progress=progress,
                                     messages=messages,
+                                    unreachable_ns_ips=unreachable_ns_ips,
                                 )
                             parent_decisions[parent_key] = cached
                             if cached.allow_descendants:
@@ -1897,6 +1919,7 @@ def _test_candidates(
                     source_method="generated_candidate",
                     log_sink=messages,
                     recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
+                    unreachable_ns_ips=unreachable_ns_ips,
                 )
             else:
                 # No delegation signal — skip the auth-server NS walk entirely.
@@ -2311,6 +2334,15 @@ def scan_domain(
                     continue
                 ns_host_errors: list[str] = []
                 for ns_ip in ns_ips:
+                    # 29B: skip IPs already proven unreachable this run.
+                    if ns_ip in unreachable_ns_ips:
+                        _emit(
+                            f"  Skipping auth NS {ns_host} ({ns_ip}): "
+                            "known unreachable this run (29B short-circuit)",
+                            progress,
+                            messages,
+                        )
+                        continue
                     auth_resolver = _make_resolver(ns_ip)
                     auth_findings, auth_errors = _query_records(
                         domain,
@@ -2323,6 +2355,10 @@ def scan_domain(
                         log_sink=messages,
                         evidence_outcomes=result.evidence_outcomes,
                     )
+                    # 29B: detect and cache the first ENETUNREACH for this IP.
+                    for err in auth_errors:
+                        if _is_unreachable_error(err):
+                            unreachable_ns_ips.add(ns_ip)
                     if auth_findings:
                         _emit(
                             f"  Auth NS {ns_host} ({ns_ip}): {len(auth_findings)} base record(s)",
@@ -2415,6 +2451,11 @@ def scan_domain(
     # re-discovers the same parent's NS hosts from scratch.
     parent_ns_cache: dict[str, list[str]] = {_display_name(domain): list(ns_hosts)}
     ns_ip_cache: dict[str, list[str]] = {}
+    # 29B: per-run auth-NS reachability cache — NS IPs that returned an instant
+    # network-unreachable OSError are recorded here so the same query is never
+    # re-issued per candidate.  Only ENETUNREACH/WSAENETUNREACH shape entries;
+    # timeout/SERVFAIL are not cached (they are real DNS conditions).
+    unreachable_ns_ips: set[str] = set()
     _emit(
         f"  Candidate names to test: {len(fourth_candidates)} 4th-level, "
         f"{len(fifth_candidates)} 5th-level ({candidate_total} total)",
@@ -2459,6 +2500,7 @@ def scan_domain(
         candidates_total=candidate_total,
         parent_ns_cache=parent_ns_cache,
         ns_ip_cache=ns_ip_cache,
+        unreachable_ns_ips=unreachable_ns_ips,
     )
     result.fourth_level_candidates_tested = fourth_tested
 
@@ -2545,6 +2587,7 @@ def scan_domain(
             parent_decisions=parent_decisions,
             parent_ns_cache=parent_ns_cache,
             ns_ip_cache=ns_ip_cache,
+            unreachable_ns_ips=unreachable_ns_ips,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested
