@@ -121,6 +121,32 @@ def decide_parent_gating_from_probe_classes(
             )
         )
 
+    if DNSResponseClass.NOERROR_NODATA_PARENT_AUTHORITY in classes_seen and not (
+        classes_seen & _POSITIVE_CLASSES
+        or classes_seen & _INCONCLUSIVE_CLASSES
+        or DNSResponseClass.UNRELATED_AUTHORITY in classes_seen
+    ):
+        # Ticket T32: branch apex is in-zone but has no direct records and is
+        # not delegated.  Distinct from NXDOMAIN ("name absent") and from
+        # UNRELATED_AUTHORITY ("non-parent authority").
+        # EVIDENCE DISCIPLINE: this is NOT absence; do not say "does not exist."
+        return _finalize(
+            ParentGatingDecision(
+                allow_descendants=False,
+                parent_name=parent_name,
+                reason="Parent apex has no direct DNS records (NODATA with parent authority)",
+                evidence_status=EvidenceStatus.NODATA_PARENT_AUTHORITY,
+                response_class=DNSResponseClass.NOERROR_NODATA_PARENT_AUTHORITY.value,
+                confidence=ParentGatingConfidence.HEURISTIC_SKIP,
+                diagnostic_message=(
+                    f"Skipped deeper candidates because {parent_name} had no direct DNS "
+                    "records using tested methods (NODATA with parent-zone authority). "
+                    "This does not prove descendants do not exist — the name is in-zone "
+                    "but not delegated per this probe."
+                ),
+            )
+        )
+
     if saw_unrelated_authority or DNSResponseClass.UNRELATED_AUTHORITY in classes_seen:
         return _finalize(
             ParentGatingDecision(

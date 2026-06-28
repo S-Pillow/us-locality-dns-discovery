@@ -5,10 +5,10 @@ finding creation code may inspect it.  Finding creation paths consult the
 returned DNSResponseClass to decide whether and what kind of evidence is
 permitted.
 
-Nine classifier values (DNSResponseClass):
+Ten classifier values (DNSResponseClass):
   OWNER_MATCHING_ANSWER, REFERRAL_DELEGATION, NEGATIVE_NXDOMAIN,
-  NODATA_EMPTY_ANSWER, SERVFAIL, TIMEOUT, UNRELATED_AUTHORITY,
-  CNAME_ALIAS, MALFORMED_OR_UNUSABLE
+  NODATA_EMPTY_ANSWER, NOERROR_NODATA_PARENT_AUTHORITY, SERVFAIL,
+  TIMEOUT, UNRELATED_AUTHORITY, CNAME_ALIAS, MALFORMED_OR_UNUSABLE
 
 Classification priority (highest to lowest):
   transport error                 → TIMEOUT or MALFORMED_OR_UNUSABLE
@@ -21,7 +21,9 @@ Classification priority (highest to lowest):
   rcode NOERROR + no owner-matching answer
       authority has NS  owner == qname  → REFERRAL_DELEGATION
       authority has SOA owner == qname  → NODATA_EMPTY_ANSWER
-      authority has NS/SOA for other name → UNRELATED_AUTHORITY
+      authority has SOA owned by an ANCESTOR of qname, no NS in authority
+                                        → NOERROR_NODATA_PARENT_AUTHORITY (Ticket T32)
+      authority has NS/SOA for other name (incl. ancestor NS) → UNRELATED_AUTHORITY
       empty authority                   → NODATA_EMPTY_ANSWER
 """
 
@@ -75,6 +77,23 @@ class DNSResponseClass(str, Enum):
     Proves the queried alias exists; does not automatically promote the CNAME
     target as in-scope."""
 
+    NOERROR_NODATA_PARENT_AUTHORITY = "noerror_nodata_parent_authority"
+    """rcode NOERROR, no owner-matching answer, authority section contains a
+    SOA record whose owner is an *ancestor* of the queried name (parent zone
+    SOA), with no NS for the queried name.
+
+    Semantic: the name exists within the parent zone but has no direct DNS
+    record at the queried name and is not a delegated child zone.  This is
+    the pre-delegation registry pattern — a name entered directly in the
+    parent zone without its own NS.  (Ticket T32.)
+
+    Evidence discipline (HARD):
+    - NOT a delegated child zone.
+    - NOT NXDOMAIN / absence.
+    - NOT proof that descendants do not exist.
+    - IS: "name in parent zone / no direct record / possible branch container."
+    No finding.  Routing → context/diagnostic only."""
+
     MALFORMED_OR_UNUSABLE = "malformed_or_unusable"
     """Response is None, unparseable, or has an unexpected rcode.
     Fail-closed: no finding."""
@@ -83,6 +102,23 @@ class DNSResponseClass(str, Enum):
 def _norm_name(name: str) -> str:
     """Normalize a DNS name to lowercase without trailing dot."""
     return name.strip().lower().rstrip(".")
+
+
+def _is_ancestor(ancestor_candidate: str, name: str) -> bool:
+    """Return True when *ancestor_candidate* is a proper ancestor zone of *name*.
+
+    ``_is_ancestor("k12.pa.us", "pvt.k12.pa.us")`` → True
+    ``_is_ancestor("pa.us",     "pvt.k12.pa.us")`` → True
+    ``_is_ancestor("pvt.k12.pa.us", "pvt.k12.pa.us")`` → False (same name)
+    ``_is_ancestor("godaddy.com", "pvt.k12.pa.us")`` → False (unrelated)
+
+    Used in Ticket T32 ancestor-SOA detection.
+    """
+    a = _norm_name(ancestor_candidate)
+    n = _norm_name(name)
+    if not a or not n or a == n:
+        return False
+    return n.endswith("." + a)
 
 
 def _is_timeout_transport_error(transport_error: str) -> bool:
@@ -158,11 +194,12 @@ def classify_dns_response(
 
     # --- NOERROR, no owner-matching answer: inspect authority section ------
     # Walk every authority rrset and record whether we see owner-matching
-    # NS/SOA or unrelated (different-owner) NS/SOA.  Owner-matching NS takes
-    # highest priority because it signals a real delegation referral.
-    has_own_ns: bool = False
-    has_own_soa: bool = False
-    has_unrelated: bool = False
+    # NS/SOA, ancestor-zone SOA, or truly unrelated NS/SOA.  Owner-matching
+    # NS takes highest priority (real delegation referral).
+    has_own_ns: bool = False       # NS for the queried name → REFERRAL_DELEGATION
+    has_own_soa: bool = False      # SOA for the queried name → NODATA_EMPTY_ANSWER
+    has_ancestor_soa: bool = False # SOA for an ancestor zone (no NS present) → NOERROR_NODATA_PARENT_AUTHORITY (T32)
+    has_unrelated: bool = False    # Any NS not owned by qname, or SOA not owned by qname/ancestor
 
     for rrset in response.authority:
         try:
@@ -176,26 +213,43 @@ def classify_dns_response(
             if owner == nq:
                 has_own_ns = True
             else:
+                # Any NS whose owner is not the queried name (whether ancestor or
+                # unrelated zone) is treated as unrelated authority.  Ancestor-zone
+                # NS appearing in authority means the parent zone is asserting its
+                # own delegation — not a delegation for the queried name; existing
+                # behavior preserved (UNRELATED_AUTHORITY path) so that delegation-
+                # verifier code that relies on UNRELATED_AUTHORITY for parent-NS
+                # responses is not regressed.
                 has_unrelated = True
         elif rdtype == dns.rdatatype.SOA:
             if owner == nq:
                 has_own_soa = True
+            elif _is_ancestor(owner, nq):
+                # Ancestor-zone SOA: the parent (or grandparent) authoritative
+                # server is telling us this name is in-zone but has no direct
+                # record.  Track separately from truly unrelated SOA (Ticket T32).
+                has_ancestor_soa = True
             else:
-                # SOA from a different zone (TLD, parent, .com registry, etc.)
+                # SOA from a genuinely unrelated zone (TLD, cross-namespace, etc.)
                 has_unrelated = True
         else:
-            # Other authority record types (NSEC, DS, …) from a different
-            # owner are treated as unrelated; from the queried name they are
-            # unexpected but not a security concern — leave unrelated flag
-            # unchanged in the owner-match case.
-            if owner != nq:
+            # Other authority record types (NSEC, DS, …).
+            if owner != nq and not _is_ancestor(owner, nq):
                 has_unrelated = True
 
-    # Priority: owner-matching NS > owner-matching SOA > unrelated > empty
+    # Priority:
+    #   own NS       → REFERRAL_DELEGATION
+    #   own SOA      → NODATA_EMPTY_ANSWER (zone exists, record type absent)
+    #   ancestor SOA → NOERROR_NODATA_PARENT_AUTHORITY (in-zone, not delegated)
+    #                  *only when no truly unrelated authority is also present*
+    #   unrelated    → UNRELATED_AUTHORITY
+    #   empty        → NODATA_EMPTY_ANSWER
     if has_own_ns:
         return DNSResponseClass.REFERRAL_DELEGATION
     if has_own_soa:
         return DNSResponseClass.NODATA_EMPTY_ANSWER
+    if has_ancestor_soa and not has_unrelated:
+        return DNSResponseClass.NOERROR_NODATA_PARENT_AUTHORITY
     if has_unrelated:
         return DNSResponseClass.UNRELATED_AUTHORITY
 
@@ -211,6 +265,7 @@ _NO_FINDING_CLASSES: frozenset[DNSResponseClass] = frozenset(
     {
         DNSResponseClass.NEGATIVE_NXDOMAIN,
         DNSResponseClass.NODATA_EMPTY_ANSWER,
+        DNSResponseClass.NOERROR_NODATA_PARENT_AUTHORITY,
         DNSResponseClass.SERVFAIL,
         DNSResponseClass.TIMEOUT,
         DNSResponseClass.UNRELATED_AUTHORITY,
