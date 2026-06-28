@@ -213,6 +213,12 @@ class EvidenceOutcome:
     evidence_trace: list[EvidenceTrace] = field(default_factory=list)
     # Per-parent wildcard attestation status attached at testing time (R4a).
     attestation_status: str | None = None
+    # §8 match-detail fields — populated at suppression time for
+    # SUPPRESSED_WILDCARD_MATCH outcomes only (R4c).
+    matched_rrtype: str | None = None
+    """Comma-separated RR type(s) whose values matched the wildcard signature."""
+    matched_values: list[str] | None = None
+    """Normalized rdata values that matched the wildcard signature."""
 
 
 class ParentGatingConfidence(str, Enum):
