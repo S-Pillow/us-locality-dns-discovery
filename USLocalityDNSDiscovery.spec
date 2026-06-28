@@ -9,7 +9,8 @@ Source commit: a71f6ad  (main, post-T32: T31 Lane-1 registry matrix + T32 NODATA
 
 Verification:
   USLocalityDNSDiscovery.exe --batch-verify
-  (console=True allows stdout capture for automated packaged-artifact checks)
+  Windowed build: output written to batch_verify_report.txt (beside the exe or in output/).
+  Console/source build: output goes to stdout as before.
 """
 
 block_cipher = None
@@ -64,10 +65,9 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
-    # console=True enables stdout for --batch-verify packaged-artifact checks.
-    # Operators running the GUI will see a brief console window; acceptable for
-    # this build.  Set False if a silent-launch release is required later.
+    console=False,
+    # console=False: windowed operator build — no console on double-click.
+    # --batch-verify detects the no-stdout context and writes to a file instead.
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

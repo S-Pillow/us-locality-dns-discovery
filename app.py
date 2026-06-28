@@ -974,28 +974,52 @@ def _batch_verify() -> None:  # noqa: C901
     """Packaged-artifact verification mode (PKG ticket, §18.13).
 
     Invoked by ``USLocalityDNSDiscovery.exe --batch-verify``.
-    Runs all 7 packaged-artifact checks and prints a structured report to
-    stdout so the PKG verification script can capture and assert them.
-    Exits 0 on pass, 1 on any failure.
+    Runs all 7 packaged-artifact checks and exits 0 on pass, 1 on any failure.
+
+    Output routing:
+    - Console / source run (sys.stdout available): writes to stdout as before.
+    - Windowed exe (sys.stdout is None): writes to ``batch_verify_report.txt``
+      in the output folder beside the exe; shows a pass/fail dialog on exit.
     """
-    import io
     import sys
     import tempfile
 
-    print("=== PKG BATCH VERIFY ===")
+    # Detect windowed / no-stdout context (sys.stdout is None in a windowed
+    # PyInstaller exe).  Source runs and console builds keep the stdout path.
+    _windowed = sys.stdout is None
+
+    if _windowed:
+        from scanner.paths import get_default_output_dir
+        _report_dir = get_default_output_dir()
+        _report_dir.mkdir(parents=True, exist_ok=True)
+        _report_path = _report_dir / "batch_verify_report.txt"
+        _report_file = _report_path.open("w", encoding="utf-8")
+
+        def _emit(msg: str) -> None:
+            _report_file.write(msg + "\n")
+            _report_file.flush()
+    else:
+        _report_path = None
+        _report_file = None
+
+        def _emit(msg: str) -> None:
+            print(msg)
+
     failures: list[str] = []
 
+    _emit("=== PKG BATCH VERIFY ===")
+
     # Check 1: Clean launch — if we get here, the exe started without error.
-    print("[1] Clean launch: PASS (reached batch-verify entry point)")
+    _emit("[1] Clean launch: PASS (reached batch-verify entry point)")
 
     # Check 2: source_commit embedded correctly.
     from scanner.version import get_source_commit, APP_VERSION, SOURCE_COMMIT
     commit = get_source_commit()
-    print(f"[2] source_commit: {commit!r}  APP_VERSION: {APP_VERSION!r}  SOURCE_COMMIT: {SOURCE_COMMIT!r}")
+    _emit(f"[2] source_commit: {commit!r}  APP_VERSION: {APP_VERSION!r}  SOURCE_COMMIT: {SOURCE_COMMIT!r}")
     if not commit or commit == "unstamped":
         failures.append("[2] source_commit is 'unstamped' — stamping failed")
     else:
-        print(f"[2] source_commit: PASS")
+        _emit("[2] source_commit: PASS")
 
     # Check 3: Wordlists bundled — build a wordlist plan and check branch/label counts.
     wdir = None
@@ -1004,27 +1028,25 @@ def _batch_verify() -> None:  # noqa: C901
         from scanner.models import ScanOptions, ScanProfile
         from scanner.paths import get_wordlists_dir
         wdir = get_wordlists_dir()
-        print(f"[3] wordlists dir: {wdir}")
+        _emit(f"[3] wordlists dir: {wdir}")
         opts = ScanOptions(scan_profile=ScanProfile.NORMAL)
         plan = build_wordlist_plan(opts, wordlists_dir=wdir)
-        source_counts = plan.source_counts  # dict[source_name, label_count]
-        print(f"[3] label sources: {list(source_counts.keys())}")
-        print(f"[3] total unique labels: {plan.total_unique_labels}")
+        _emit(f"[3] label sources: {list(plan.source_counts.keys())}")
+        _emit(f"[3] total unique labels: {plan.total_unique_labels}")
         branch_count = len(FIFTH_LEVEL_BRANCHES)
-        print(f"[3] FIFTH_LEVEL_BRANCHES ({branch_count}): {FIFTH_LEVEL_BRANCHES}")
+        _emit(f"[3] FIFTH_LEVEL_BRANCHES ({branch_count}): {FIFTH_LEVEL_BRANCHES}")
         if branch_count != 7:
             failures.append(f"[3] Expected 7 RFC branches, got {branch_count}")
         else:
-            print("[3] Wordlists/branches: PASS")
+            _emit("[3] Wordlists/branches: PASS")
     except Exception as exc:
         failures.append(f"[3] Wordlist check FAILED: {exc}")
 
     # Check 4+5+6+7: Live DNS scan with registry-known input (k12.pa.us LIGHT).
     try:
         from pathlib import Path
-        import csv, tempfile, time
+        import csv, time
 
-        # Write a temp input CSV with registry-known names including the fcs mission case.
         tmpdir = Path(tempfile.mkdtemp())
         input_csv = tmpdir / "verify_input.csv"
         with input_csv.open("w", newline="", encoding="utf-8") as f:
@@ -1059,23 +1081,23 @@ def _batch_verify() -> None:  # noqa: C901
             result = run_scan(scan_input)
             elapsed = time.monotonic() - t0
 
-            # Check 4: DNS works (scan completed without total failure).
+            # Check 4: DNS works.
             if result.scan_status == ScanStatus.FAILED:
                 failures.append("[4] Scan FAILED — DNS/scan engine broken in package")
             else:
-                print(f"[4] DNS scan: PASS (elapsed {elapsed:.1f}s, status={result.scan_status})")
+                _emit(f"[4] DNS scan: PASS (elapsed {elapsed:.1f}s, status={result.scan_status})")
 
             # Check 5: Lane 1 — registry matrix + strong-gap.
             if result.domain_results:
                 dr = result.domain_results[0]
                 matrix = dr.registry_matrix
-                print(f"[5] Registry matrix entries: {len(matrix)}")
+                _emit(f"[5] Registry matrix entries: {len(matrix)}")
                 strong_gaps = [e for e in matrix if e.matrix_cell.value == "strong_gap"]
-                print(f"[5] Strong gaps: {[e.fqdn for e in strong_gaps]}")
+                _emit(f"[5] Strong gaps: {[e.fqdn for e in strong_gaps]}")
                 if not any(e.fqdn == "fcs.pvt.k12.pa.us" for e in strong_gaps):
                     failures.append("[5] fcs.pvt.k12.pa.us NOT in strong-gap list")
                 else:
-                    print("[5] Lane 1 fcs STRONG_GAP: PASS")
+                    _emit("[5] Lane 1 fcs STRONG_GAP: PASS")
             else:
                 failures.append("[5] No domain results — scan produced nothing")
 
@@ -1084,10 +1106,10 @@ def _batch_verify() -> None:  # noqa: C901
                 outcome = export_results(result, output_dir, "xlsx")
                 if outcome.xlsx_path and outcome.xlsx_path.exists():
                     xlsx_size = outcome.xlsx_path.stat().st_size
-                    print(f"[6] XLSX export: {outcome.xlsx_path.name} ({xlsx_size} bytes)")
+                    _emit(f"[6] XLSX export: {outcome.xlsx_path.name} ({xlsx_size} bytes)")
                     matrix_rows = build_registry_matrix_rows(result)
                     if matrix_rows:
-                        print(f"[6] Registry Matrix rows in XLSX: {len(matrix_rows)} — PASS")
+                        _emit(f"[6] Registry Matrix rows in XLSX: {len(matrix_rows)} — PASS")
                     else:
                         failures.append("[6] Registry Matrix rows empty in XLSX export")
                 else:
@@ -1095,24 +1117,28 @@ def _batch_verify() -> None:  # noqa: C901
             except Exception as exc:
                 failures.append(f"[6] XLSX export FAILED: {exc}")
 
-            # Check 7: Perf sane (light scan on 1 domain should finish in < 120s).
+            # Check 7: Perf sane.
             if elapsed > 120:
                 failures.append(f"[7] Perf degraded: {elapsed:.1f}s > 120s budget")
             else:
-                print(f"[7] Perf: PASS ({elapsed:.1f}s)")
+                _emit(f"[7] Perf: PASS ({elapsed:.1f}s)")
 
     except Exception as exc:
         failures.append(f"[4-7] Scan/verify block FAILED: {exc}")
 
-    print("\n=== RESULT ===")
-    if failures:
-        print("FAIL")
-        for f in failures:
-            print(f"  FAIL: {f}")
-        sys.exit(1)
+    _emit("\n=== RESULT ===")
+    passed = not failures
+    if passed:
+        _emit("ALL CHECKS PASSED")
     else:
-        print("ALL CHECKS PASSED")
-        sys.exit(0)
+        _emit("FAIL")
+        for f in failures:
+            _emit(f"  FAIL: {f}")
+
+    if _report_file:
+        _report_file.close()
+
+    sys.exit(0 if passed else 1)
 
 
 def main() -> None:
