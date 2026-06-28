@@ -46,6 +46,25 @@ def _norm_name(name: str) -> str:
     return name.strip().lower().rstrip(".")
 
 
+def _is_unreachable_transport_error(error: str | None) -> bool:
+    """True when *error* is an instant OS network-unreachable failure.
+
+    Only WSAENETUNREACH (WinError 10051 / errno 10051) and ENETUNREACH
+    (errno 101 on Linux) trigger the 29B short-circuit.  Timeout, SERVFAIL,
+    and REFUSED are distinct failure classes and must NOT be short-circuited.
+    """
+    if error is None:
+        return False
+    lower = error.lower()
+    return (
+        "network unreachable" in lower
+        or "unreachable network" in lower
+        or "winerror 10051" in lower
+        or "errno 10051" in lower
+        or "[errno 101]" in lower
+    )
+
+
 def _parent_domain(name: str) -> str | None:
     labels = _norm_name(name).split(".")
     if len(labels) < 3:
@@ -397,6 +416,7 @@ def verify_delegated_child_zone(
     source_method: str = "delegation_verification",
     log_sink: list[str] | None = None,
     recursive_resolvers: list[str] | None = None,
+    unreachable_ns_ips: set[str] | None = None,
 ) -> DelegationVerificationResult:
     """Verify delegation for *candidate*; return structured result (fail-closed).
 
@@ -446,8 +466,22 @@ def verify_delegated_child_zone(
     # --- Path 1: parent-side authoritative NS owner match -------------------
     for ns_host in hosts:
         for ns_ip in resolve_ns_ips(ns_host):
+            # 29B: skip IPs already proven unreachable this run.
+            if unreachable_ns_ips is not None and ns_ip in unreachable_ns_ips:
+                if log_sink is not None:
+                    log_sink.append(
+                        f"Skipping auth NS {ns_host} ({ns_ip}) for {candidate_norm}: "
+                        "known unreachable this run (29B short-circuit)"
+                    )
+                continue
             resolver = make_resolver(ns_ip)
             response, transport_error = send_query(candidate_norm, RecordType.NS, resolver)
+            # 29B: detect and cache the first ENETUNREACH for this IP.
+            if (
+                unreachable_ns_ips is not None
+                and _is_unreachable_transport_error(transport_error)
+            ):
+                unreachable_ns_ips.add(ns_ip)
             if transport_error and "timeout" in transport_error.lower():
                 errors.append(transport_error)
 
