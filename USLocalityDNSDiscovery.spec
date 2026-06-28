@@ -1,5 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for US Locality DNS Discovery Tool."""
+"""PyInstaller spec for US Locality DNS Discovery Tool.
+
+Build command: pyinstaller USLocalityDNSDiscovery.spec
+Packaged artifact: dist/USLocalityDNSDiscovery.exe
+
+Release version: 0.25.0
+Source commit: a71f6ad  (main, post-T32: T31 Lane-1 registry matrix + T32 NODATA classification)
+
+Verification:
+  USLocalityDNSDiscovery.exe --batch-verify
+  (console=True allows stdout capture for automated packaged-artifact checks)
+"""
 
 block_cipher = None
 
@@ -7,8 +18,29 @@ a = Analysis(
     ["app.py"],
     pathex=[],
     binaries=[],
-    datas=[("wordlists", "wordlists")],
-    hiddenimports=["dns", "dns.resolver", "dns.query", "dns.zone", "openpyxl"],
+    datas=[
+        # Wordlists: all 7 label files (civic_departments, delegated_manager_clues,
+        # dns_common, light_evidence, public_services, rfc1480, schools_libraries).
+        ("wordlists", "wordlists"),
+    ],
+    hiddenimports=[
+        "dns",
+        "dns.resolver",
+        "dns.query",
+        "dns.zone",
+        "dns.rdatatype",
+        "dns.rdataclass",
+        "dns.rcode",
+        "dns.name",
+        "dns.message",
+        "dns.flags",
+        "dns.rdataset",
+        "dns.rrset",
+        "dns.exception",
+        "openpyxl",
+        "openpyxl.styles",
+        "openpyxl.utils",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -32,7 +64,10 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    console=True,
+    # console=True enables stdout for --batch-verify packaged-artifact checks.
+    # Operators running the GUI will see a brief console window; acceptable for
+    # this build.  Set False if a silent-launch release is required later.
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
