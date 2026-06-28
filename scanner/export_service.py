@@ -34,7 +34,9 @@ from scanner.models import (
     EvidenceOutcome,
     EvidenceStatus,
     FindingClassification,
+    MatrixCell,
     RecordType,
+    RegistryKnownEntry,
     ScanRunResult,
     ScanStatus,
 )
@@ -372,6 +374,12 @@ EVIDENCE_VALUE_FILLS = {
     "Context only": PatternFill(fill_type="solid", fgColor="EDEDED"),
     "None": PatternFill(fill_type="solid", fgColor="F8CBAD"),
     "Inconclusive": PatternFill(fill_type="solid", fgColor="FFC7CE"),
+}
+
+# Ticket T31 — highlight fill for strong-gap rows in the Registry Matrix sheet.
+_STRONG_GAP_FILL = PatternFill(fill_type="solid", fgColor="FF7F7F")
+REGISTRY_MATRIX_IS_STRONG_GAP_FILLS: dict[str, PatternFill] = {
+    "yes": _STRONG_GAP_FILL,
 }
 
 
@@ -2880,6 +2888,91 @@ def build_json_document(result: ScanRunResult) -> dict:
     }
 
 
+REGISTRY_MATRIX_COLUMNS = [
+    "scan_timestamp",
+    "base_domain",
+    "registry_known_name",
+    "dns_status",
+    "portal_status",
+    "matrix_cell",
+    "is_strong_gap",
+    "dns_record_types",
+    "dns_detail",
+]
+"""Column order for the Registry Matrix sheet/CSV (Ticket T31, Lane 1)."""
+
+REGISTRY_MATRIX_HEADER_LABELS: dict[str, str] = {
+    "scan_timestamp": "Scan Timestamp",
+    "base_domain": "Base Domain",
+    "registry_known_name": "Registry Known Name",
+    "dns_status": "DNS Status",
+    "portal_status": "Portal / System Status",
+    "matrix_cell": "Matrix Cell",
+    "is_strong_gap": "Is Strong Gap",
+    "dns_record_types": "DNS Record Types",
+    "dns_detail": "DNS Detail",
+}
+
+REGISTRY_MATRIX_CELL_NOTE = (
+    "Evidence matrix (Ticket T31, Lane 1):\n"
+    "  strong_gap        — registry-known + DNS-live + NOT in portal view "
+    "(registry fact + DNS evidence + portal gap — primary defensible finding).\n"
+    "  validation_only   — registry-known + DNS-live + present in portal view "
+    "(both sources agree, DNS confirms).\n"
+    "  registry_only     — registry-known + DNS NOT live + not in portal view "
+    "(registry record, no DNS evidence).\n"
+    "  registry_portal_match — registry-known + DNS NOT live + present in portal view "
+    "(no DNS evidence found this run).\n"
+    "Lane-1 names (registry_known_names input column) and Lane-2 names "
+    "(wordlist candidates) are kept strictly separate. A registry-known name "
+    "that is DNS-live but absent from the portal is factually described as "
+    "'registry-known, DNS-live, not in portal view' — NOT as concealment."
+)
+
+
+def build_registry_matrix_rows(result: ScanRunResult) -> list[dict[str, str]]:
+    """Build per-name evidence-matrix rows for all domains (Ticket T31, Lane 1).
+
+    Returns one row per registry-known name per domain.  Empty when no domain
+    has ``registry_known_names`` input.  Rows are ordered: strong_gap first,
+    then validation_only, registry_only, registry_portal_match.
+    """
+    rows: list[dict[str, str]] = []
+    scan_ts = _format_timestamp(result.scan_timestamp)
+
+    for domain_result in result.domain_results:
+        if not domain_result.registry_matrix:
+            continue
+        # Surface strong-gap entries first within each domain.
+        sorted_entries = sorted(
+            domain_result.registry_matrix,
+            key=lambda e: (
+                0
+                if e.matrix_cell == MatrixCell.STRONG_GAP
+                else (
+                    1
+                    if e.matrix_cell == MatrixCell.VALIDATION_ONLY
+                    else (2 if e.matrix_cell == MatrixCell.REGISTRY_ONLY else 3)
+                )
+            ),
+        )
+        for entry in sorted_entries:
+            rows.append(
+                {
+                    "scan_timestamp": scan_ts,
+                    "base_domain": domain_result.domain,
+                    "registry_known_name": entry.fqdn,
+                    "dns_status": entry.dns_status.value,
+                    "portal_status": entry.portal_status.value,
+                    "matrix_cell": entry.matrix_cell.value,
+                    "is_strong_gap": "yes" if entry.matrix_cell == MatrixCell.STRONG_GAP else "no",
+                    "dns_record_types": "; ".join(entry.dns_record_types),
+                    "dns_detail": entry.dns_detail,
+                }
+            )
+    return rows
+
+
 def build_how_to_read_rows() -> list[tuple[str, str]]:
     """Build short coworker guidance for the How to Read workbook sheet."""
     return [
@@ -3176,6 +3269,19 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         wrap_column_keys={"message", "notes"},
     )
 
+    # Ticket T31 Lane 1 — Registry Matrix sheet (only emitted when data is present).
+    registry_rows = build_registry_matrix_rows(result)
+    if registry_rows:
+        registry_sheet = workbook.create_sheet("Registry Matrix")
+        _write_table_sheet(
+            registry_sheet,
+            _sheet_columns(REGISTRY_MATRIX_COLUMNS, REGISTRY_MATRIX_HEADER_LABELS),
+            registry_rows,
+            wrap_column_keys={"dns_detail"},
+            highlight_column_key="is_strong_gap",
+            highlight_fill_map=REGISTRY_MATRIX_IS_STRONG_GAP_FILLS,
+        )
+
     workbook.save(path)
     return path
 
@@ -3224,6 +3330,22 @@ def export_summary_csv(result: ScanRunResult, output_dir: Path) -> Path:
     return path
 
 
+def export_registry_matrix_csv(result: ScanRunResult, output_dir: Path) -> Path | None:
+    """Write Registry Matrix CSV (Ticket T31, Lane 1); returns None when no data."""
+    rows = build_registry_matrix_rows(result)
+    if not rows:
+        return None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{_findings_report_stem(result.scan_timestamp)}_registry_matrix.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=REGISTRY_MATRIX_COLUMNS, extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return path
+
+
 def export_json(result: ScanRunResult, output_dir: Path) -> Path:
     """Write JSON report and return path."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3255,11 +3377,15 @@ def export_results(
     if export_format in {"csv", "all"}:
         outcome.csv_path, _ = export_csv(result, output_dir)
         outcome.diagnostics_csv_path = export_diagnostics_csv(result, output_dir)
+        # Ticket T31 — Registry Matrix CSV (emitted only when registry_known_names present).
+        export_registry_matrix_csv(result, output_dir)
 
     if export_format in {"json", "all"}:
         outcome.json_path = export_json(result, output_dir)
 
     if export_format == "all":
         outcome.summary_csv_path = export_summary_csv(result, output_dir)
+        # Ticket T31 — also emit Registry Matrix CSV in "all" format.
+        export_registry_matrix_csv(result, output_dir)
 
     return outcome
