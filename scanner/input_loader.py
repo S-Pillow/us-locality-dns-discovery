@@ -37,12 +37,17 @@ KNOWN_METADATA_KEYS: dict[str, str] = {
     "fifth level count": "fifth_level_count",
     "sample reason": "sample_reason",
     "notes": "notes",
+    # Ticket T31 Lane 1 — registry-known names (distinct from portal/system-known).
+    "registry known names": "registry_known_names",
+    "registry names": "registry_known_names",
+    "registry known": "registry_known_names",
 }
 
 RECOGNIZED_METADATA_FIELDS = frozenset(KNOWN_METADATA_KEYS.values()) | {
     "third_level_domain",
     "fourth_level_domains",
     "fifth_level_domains",
+    "registry_known_names",
 }
 
 NULL_LIKE_VALUES = frozenset(
@@ -73,6 +78,8 @@ PREFERRED_ENRICHED_FIELDS = frozenset(
         "fifth_level_count",
     }
 )
+
+REGISTRY_INPUT_FIELDS = frozenset({"registry_known_names"})
 
 RECOMMENDED_INPUT_COLUMNS_CSV = (
     "domain,delegated_manager,known_fourth_level_domains,"
@@ -236,6 +243,8 @@ def _build_input_record(
     delegated_manager = metadata.get("delegated_manager") or metadata.get("companyname") or ""
     fourth_raw, fifth_raw = _merge_known_child_fields(metadata)
 
+    registry_raw = metadata.get("registry_known_names", "")
+
     return DomainInputRecord(
         domain=normalized,
         original_domain=original_domain,
@@ -251,6 +260,7 @@ def _build_input_record(
         fifth_level_count=_parse_count(metadata.get("fifth_level_count", "")),
         sample_reason=metadata.get("sample_reason", ""),
         notes=metadata.get("notes", ""),
+        registry_known_names=_split_domain_list(registry_raw),
     )
 
 

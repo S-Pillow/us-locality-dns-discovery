@@ -126,6 +126,11 @@ class DomainInputRecord:
     fifth_level_count: str = ""
     sample_reason: str = ""
     notes: str = ""
+    registry_known_names: list[str] = field(default_factory=list)
+    """Ticket T31 Lane 1: names known to exist in the registry database.
+    Distinct from portal/system-known (known_fourth/fifth_level_domains).
+    Each name is DNS-validated and compared against the portal columns to
+    produce the evidence matrix."""
 
 
 @dataclass
@@ -179,6 +184,62 @@ class EvidenceStatus(str, Enum):
     """Candidate response matches the parent's wildcard signature; suppressed to diagnostic."""
     WITHHELD_WILDCARD_INCONCLUSIVE = "WITHHELD_WILDCARD_INCONCLUSIVE"
     """Wildcard attestation at parent was inconclusive; promotion withheld in Light mode."""
+
+
+class RegistryDNSStatus(str, Enum):
+    """DNS validation result for a registry-known name (Ticket T31, Lane 1)."""
+
+    DNS_CONFIRMED = "dns_confirmed"
+    """Name resolves with one or more DNS records — live in DNS."""
+    DNS_NOT_CONFIRMED = "dns_not_confirmed"
+    """No live DNS records found for this registry-known name."""
+
+
+class PortalStatus(str, Enum):
+    """Whether a registry-known name appears in the portal/system-known input columns
+    (``known_fourth_level_domains`` / ``known_fifth_level_domains``).
+    (Ticket T31, Lane 1)
+    """
+
+    PORTAL_PRESENT = "portal_present"
+    """Name is listed in the portal/system-known input columns."""
+    PORTAL_MISSING = "portal_missing"
+    """Name is NOT in the portal/system-known input columns."""
+
+
+class MatrixCell(str, Enum):
+    """Which evidence-matrix cell a registry-known name falls into (Ticket T31).
+
+    Evidence matrix:
+      registry + DNS-live  + portal-missing → STRONG_GAP (the thesis)
+      registry + DNS-live  + portal-present → VALIDATION_ONLY
+      registry + DNS-dead  + portal-missing → REGISTRY_ONLY
+      registry + DNS-dead  + portal-present → REGISTRY_PORTAL_MATCH
+    """
+
+    STRONG_GAP = "strong_gap"
+    """Registry-known, DNS-live, NOT in portal view — primary gap evidence."""
+    VALIDATION_ONLY = "validation_only"
+    """Registry-known, DNS-live, present in portal view — both sources agree."""
+    REGISTRY_ONLY = "registry_only"
+    """Registry-known, DNS not live, not in portal — registry record only."""
+    REGISTRY_PORTAL_MATCH = "registry_portal_match"
+    """Registry-known, DNS not live, but present in portal — no DNS evidence."""
+
+
+@dataclass
+class RegistryKnownEntry:
+    """One registry-known name with DNS validation and portal comparison (Ticket T31)."""
+
+    fqdn: str
+    """Normalized FQDN from the registry_known_names input column."""
+    dns_status: RegistryDNSStatus
+    portal_status: PortalStatus
+    matrix_cell: MatrixCell
+    dns_record_types: list[str] = field(default_factory=list)
+    """Sorted list of DNS record types found (e.g. ['A', 'NS'])."""
+    dns_detail: str = ""
+    """Brief DNS detail for display (e.g. '24.154.178.18 (A)')."""
 
 
 @dataclass
@@ -350,6 +411,8 @@ class DomainScanResult:
     fifth_level_candidates_tested: int = 0
     scan_failed: bool = False
     input_record: DomainInputRecord | None = None
+    registry_matrix: list[RegistryKnownEntry] = field(default_factory=list)
+    """Ticket T31 Lane 1: per-name evidence matrix for registry-known names."""
 
 
 @dataclass

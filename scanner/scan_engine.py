@@ -67,10 +67,14 @@ from scanner.models import (
     EvidenceOutcome,
     EvidenceStatus,
     FindingClassification,
+    MatrixCell,
     ParentGatingDecision,
+    PortalStatus,
     PreflightSummary,
     ProgressCallback,
     RecordType,
+    RegistryDNSStatus,
+    RegistryKnownEntry,
     ScanInput,
     ScanOptions,
     ScanPhase,
@@ -158,6 +162,8 @@ RFC_SENTINEL_LABELS: tuple[str, ...] = (
     "clerk",
 )
 RFC_SENTINEL_PROBE_SOURCE = "rfc_sentinel_probe"
+REGISTRY_KNOWN_VALIDATION_SOURCE = "registry_known_validation"
+"""source_method tag for DNS records produced by the Ticket T31 registry-known validation pass."""
 
 FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
 KNOWN_CHILD_APEX_SOURCE = "known_child_apex_delegation"
@@ -1074,6 +1080,170 @@ def _run_rfc_branch_tiered_probe(
         _emit(f"    {decision.diagnostic_message}", progress, messages)
 
     return decision
+
+
+def _portal_known_names(input_record: DomainInputRecord | None) -> frozenset[str]:
+    """Return the portal/system-known name set from input (Ticket T31, Lane 1).
+
+    These are the names listed in ``known_fourth_level_domains`` and
+    ``known_fifth_level_domains`` — what the portal/GoDaddy system reports.
+    Used to classify each registry-known name as ``portal_present`` or
+    ``portal_missing``.
+    """
+    if input_record is None:
+        return frozenset()
+    known: set[str] = set()
+    for name in input_record.known_fourth_level_domains + input_record.known_fifth_level_domains:
+        n = _display_name(name)
+        if n:
+            known.add(n)
+    return frozenset(known)
+
+
+def _validate_registry_known_names(
+    input_record: DomainInputRecord | None,
+    domain: str,
+    resolver: dns.resolver.Resolver,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    progress: ProgressCallback | None,
+    messages: list[str],
+) -> None:
+    """Ticket T31 Lane 1 — registry-known name validation and evidence matrix.
+
+    For each name in ``input_record.registry_known_names``:
+      1. Check if the candidate scan already found DNS records for it (reuse).
+      2. If not, run a direct DNS validation query.
+      3. Compare the name against the portal/system-known set.
+      4. Classify into the evidence matrix (STRONG_GAP, VALIDATION_ONLY, etc.).
+      5. Emit a summary log line; highlight STRONG_GAP entries.
+
+    DNS records discovered here are added to ``result.records`` with
+    ``source_method=REGISTRY_KNOWN_VALIDATION_SOURCE`` so they appear in
+    the standard exports.  The structured matrix is stored in
+    ``result.registry_matrix``.
+
+    Lane-1 names (registry-known) and Lane-2 names (wordlist candidates) are
+    kept strictly separate: only ``registry_known_names`` input entries are
+    tagged ``REGISTRY_KNOWN_VALIDATION_SOURCE``; guessed candidates never are.
+    """
+    if not input_record or not input_record.registry_known_names:
+        return
+
+    portal_known = _portal_known_names(input_record)
+
+    # Index existing scan records by normalized FQDN for reuse without re-querying.
+    already_found: dict[str, list[DiscoveredRecord]] = {}
+    for r in result.records:
+        if r.classification in {
+            FindingClassification.QUERY_ERROR,
+            FindingClassification.SCAN_ERROR,
+            FindingClassification.AXFR_BLOCKED,
+            FindingClassification.NO_RECORDS_DISCOVERED,
+            FindingClassification.BASE_DOMAIN_RECORD,
+            FindingClassification.BASE_ZONE_EXISTS,
+            FindingClassification.AUTHORITATIVE_NS,
+        }:
+            continue
+        norm = _display_name(r.fqdn)
+        already_found.setdefault(norm, []).append(r)
+
+    strong_gap_count = 0
+
+    for raw_name in input_record.registry_known_names:
+        normalized = _display_name(raw_name)
+        if not normalized:
+            continue
+
+        portal_status = (
+            PortalStatus.PORTAL_PRESENT
+            if normalized in portal_known
+            else PortalStatus.PORTAL_MISSING
+        )
+
+        # Reuse existing scan results when available; otherwise run explicit DNS validation.
+        if normalized in already_found:
+            existing = already_found[normalized]
+            dns_status = RegistryDNSStatus.DNS_CONFIRMED
+            record_types = sorted({r.record_type.value for r in existing if r.record_type})
+            detail = "; ".join(
+                f"{r.value} ({r.record_type.value})"
+                for r in existing[:2]
+                if r.record_type and r.value
+            )
+        else:
+            findings, _ = _query_records(
+                normalized,
+                CANDIDATE_RECORD_TYPES,
+                resolver,
+                source_method=REGISTRY_KNOWN_VALIDATION_SOURCE,
+                classification=FindingClassification.STANDARD_RECORD,
+                base_domain=domain,
+                log_sink=messages,
+                evidence_outcomes=result.evidence_outcomes,
+            )
+            if findings:
+                for item in findings:
+                    item.confidence = _confidence_for(
+                        wildcard_suspected, item.record_type, item.classification
+                    )
+                    result.records.append(item)
+                dns_status = RegistryDNSStatus.DNS_CONFIRMED
+                record_types = sorted(
+                    {item.record_type.value for item in findings if item.record_type}
+                )
+                detail = "; ".join(
+                    f"{item.value} ({item.record_type.value})"
+                    for item in findings[:2]
+                    if item.record_type and item.value
+                )
+            else:
+                dns_status = RegistryDNSStatus.DNS_NOT_CONFIRMED
+                record_types = []
+                detail = ""
+
+        # Evidence matrix classification.
+        if dns_status == RegistryDNSStatus.DNS_CONFIRMED:
+            matrix_cell = (
+                MatrixCell.STRONG_GAP
+                if portal_status == PortalStatus.PORTAL_MISSING
+                else MatrixCell.VALIDATION_ONLY
+            )
+        else:
+            matrix_cell = (
+                MatrixCell.REGISTRY_ONLY
+                if portal_status == PortalStatus.PORTAL_MISSING
+                else MatrixCell.REGISTRY_PORTAL_MATCH
+            )
+
+        entry = RegistryKnownEntry(
+            fqdn=normalized,
+            dns_status=dns_status,
+            portal_status=portal_status,
+            matrix_cell=matrix_cell,
+            dns_record_types=record_types,
+            dns_detail=detail,
+        )
+        result.registry_matrix.append(entry)
+
+        if matrix_cell == MatrixCell.STRONG_GAP:
+            strong_gap_count += 1
+            _emit(
+                f"  STRONG GAP (Lane 1): {normalized} — registry-known, DNS-live, "
+                "not in portal/system view",
+                progress,
+                messages,
+            )
+
+    if result.registry_matrix:
+        _emit(
+            f"  Registry-known validation: {len(result.registry_matrix)} name(s) checked; "
+            f"{strong_gap_count} strong-gap (registry+DNS-live+portal-missing), "
+            f"{sum(1 for e in result.registry_matrix if e.matrix_cell == MatrixCell.VALIDATION_ONLY)} "
+            "validation-only (portal+DNS agree).",
+            progress,
+            messages,
+        )
 
 
 def _probe_known_child_apex_delegation(
@@ -2831,6 +3001,18 @@ def scan_domain(
             progress,
             messages,
         )
+
+    # --- Ticket T31 Lane 1: registry-known name validation + evidence matrix ---
+    # Runs after all candidate testing so existing scan results can be reused.
+    _validate_registry_known_names(
+        input_record,
+        domain,
+        resolver=resolver,
+        result=result,
+        wildcard_suspected=wildcard_suspected,
+        progress=progress,
+        messages=messages,
+    )
 
     result.records = _dedupe_records(result.records)
 
