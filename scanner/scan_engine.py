@@ -90,6 +90,11 @@ PER_CANDIDATE_ASYNC_BUDGET = DNS_TIMEOUT * 2 + 1.0
 CANDIDATE_WARN_THRESHOLD = 250
 CANDIDATE_STRONG_WARN_THRESHOLD = 500
 
+# Recursive resolvers used for the delegation fallback (Path 3).
+# Both must agree on the NS set before a DELEGATED_CHILD_ZONE_RECURSIVE finding
+# is promoted.  Override via recursive_resolvers= if needed in tests.
+RECURSIVE_FALLBACK_RESOLVERS: tuple[str, ...] = ("1.1.1.1", "8.8.8.8")
+
 BASE_RECORD_TYPES = (
     RecordType.NS,
     RecordType.SOA,
@@ -775,12 +780,17 @@ def _validate_fourth_level_parent(
         get_parent_ns_hosts=_get_parent_ns_hosts,
         source_method=FIFTH_LEVEL_PARENT_SOURCE,
         log_sink=messages,
+        recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
     )
     result.evidence_outcomes.extend(delegation.evidence_outcomes)
     ns_findings = [
         item
         for item in delegation.records
-        if item.classification == FindingClassification.DELEGATED_CHILD_ZONE
+        if item.classification
+        in {
+            FindingClassification.DELEGATED_CHILD_ZONE,
+            FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+        }
     ]
     ns_errors = list(delegation.errors)
     for item in delegation.records:
@@ -1822,6 +1832,7 @@ def _test_candidates(
                     parent_ns_hosts=cached_hosts,
                     source_method="generated_candidate",
                     log_sink=messages,
+                    recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
                 )
             else:
                 # No delegation signal — skip the auth-server NS walk entirely.
@@ -1838,7 +1849,11 @@ def _test_candidates(
             ns_findings = [
                 item
                 for item in delegation.records
-                if item.classification == FindingClassification.DELEGATED_CHILD_ZONE
+                if item.classification
+                in {
+                    FindingClassification.DELEGATED_CHILD_ZONE,
+                    FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+                }
             ]
             ns_candidate_errors = list(delegation.errors)
             for item in delegation.records:
@@ -1849,7 +1864,14 @@ def _test_candidates(
                     result.records.append(item)
                     candidate_record_count += 1
             if ns_findings:
-                subdelegation_count += 1
+                # Authoritative delegations increment the summary counter;
+                # recursive-corroborated ones are tracked separately in export.
+                auth_delegated = any(
+                    f.classification == FindingClassification.DELEGATED_CHILD_ZONE
+                    for f in ns_findings
+                )
+                if auth_delegated:
+                    subdelegation_count += 1
                 for item in ns_findings:
                     item.confidence = _confidence_for(
                         wildcard_suspected, item.record_type, item.classification

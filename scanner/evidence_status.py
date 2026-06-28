@@ -19,6 +19,12 @@ CONFIRMED_EVIDENCE_STATUSES = frozenset(
     }
 )
 
+# Recursive-corroborated findings are intentionally kept separate from
+# CONFIRMED_EVIDENCE_STATUSES so they are never counted in the authoritative total.
+RECURSIVE_DELEGATION_STATUSES = frozenset(
+    {EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE}
+)
+
 _DIAGNOSTIC_EVIDENCE_STATUSES = frozenset(
     {
         EvidenceStatus.CANDIDATE_TESTED,
@@ -41,6 +47,11 @@ def is_confirmed_evidence_status(status: EvidenceStatus) -> bool:
     return status in CONFIRMED_EVIDENCE_STATUSES
 
 
+def is_recursive_delegation_status(status: EvidenceStatus) -> bool:
+    """True when *status* is a resolver-corroborated delegation (lower confidence, never authoritative)."""
+    return status in RECURSIVE_DELEGATION_STATUSES
+
+
 def is_diagnostic_evidence_status(status: EvidenceStatus) -> bool:
     """True when *status* is report metadata, not a confirmed finding."""
     return status in _DIAGNOSTIC_EVIDENCE_STATUSES
@@ -61,6 +72,8 @@ def resolve_evidence_status(
         return EvidenceStatus.INCONCLUSIVE_DNS_FAILURE
     if classification == FindingClassification.DELEGATED_CHILD_ZONE:
         return EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE
+    if classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE:
+        return EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE
     if classification == FindingClassification.STANDARD_RECORD:
         return EvidenceStatus.CONFIRMED_ORDINARY_DNS_NAME
     if classification in {

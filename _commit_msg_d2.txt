@@ -1,0 +1,27 @@
+AIPF Ticket D2 -- Recursive Delegation Fallback (resolver-derived, lower-confidence)
+
+Closes the D1 Classification-B gap: when direct-auth delegation verification
+fails (targets unreachable or empty), fall back to recursive NS evidence from
+>=2 configured resolvers (1.1.1.1 + 8.8.8.8).  Promotion requires two-resolver
+agreement on the NS set (order/TTL-agnostic frozenset comparison).
+
+Locked rules honoured:
+  Rule 1  Fallback fires ONLY after both auth paths (Path 1/2) fail.
+  Rule 2  Queries >=2 recursive resolvers (RECURSIVE_FALLBACK_RESOLVERS tuple).
+  Rule 3  Promotes only when >=2 resolvers return identical NS frozensets.
+  Rule 4  Stores resolvers, NS values, source_method, verification_method.
+  Rule 5  confidence=low; classification=DELEGATED_CHILD_ZONE_RECURSIVE.
+  Rule 6  Recursive evidence NEVER satisfies authoritative assertions (NA-1 guard).
+  Rule 7  Single-resolver result does not promote (NA-2 guard).
+  Rule 8  Criterion-8 wording present in log_message and export why field.
+  Rule 9  Path 1/2 unchanged; auth success returns DELEGATED_CHILD_ZONE (NA-4).
+
+Key file changes:
+  scanner/models.py: +CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE, +DELEGATED_CHILD_ZONE_RECURSIVE
+  scanner/evidence_status.py: +RECURSIVE_DELEGATION_STATUSES, +is_recursive_delegation_status()
+  scanner/delegation_verifier.py: +_records_from_recursive_corroboration(), +_verify_via_recursive_fallback(), recursive_resolvers param wired at Path-3 trigger
+  scanner/scan_engine.py: +RECURSIVE_FALLBACK_RESOLVERS constant; both verify_delegated_child_zone call sites updated; subdelegation_count auth-only
+  scanner/export_service.py: recursive_direct_delegation set; separate child/delegated counts; verification_method column; RECURSIVE_DELEGATION_WORDING; criterion-8 in why field
+  tests/regression/test_d2_recursive_delegation.py: 14 new tests (NA-1..5, AC-1..9)
+
+Full regression chain T22->D2: 216/216 green.

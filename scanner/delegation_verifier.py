@@ -7,6 +7,11 @@ through an allowed path:
    whose owner exactly equals the candidate name (answer or referral authority).
 2. **Candidate-apex authoritative** — delegated child nameservers return
    owner-matching NS or SOA evidence at the candidate apex.
+3. **Recursive corroboration (fallback only)** — when Paths 1 and 2 both fail
+   (targets unreachable or empty), ≥2 configured recursive resolvers must agree
+   on the NS set.  Produces ``delegated_child_zone_recursive`` (lower confidence),
+   never ``delegated_child_zone``.  Recursive evidence never satisfies authoritative
+   verification tests.
 """
 
 from __future__ import annotations
@@ -171,6 +176,141 @@ def _records_from_parent_side_ns(
     return records
 
 
+def _records_from_recursive_corroboration(
+    candidate: str,
+    agreed_ns_set: frozenset[str],
+    resolvers_that_agreed: list[str],
+    *,
+    source_method: str,
+    nameserver: str,
+) -> list[DiscoveredRecord]:
+    """Build ``DELEGATED_CHILD_ZONE_RECURSIVE`` records from recursive agreement."""
+    records: list[DiscoveredRecord] = []
+    for target in sorted(agreed_ns_set):
+        trace = build_promotion_trace(
+            qname=_norm_name(candidate),
+            qtype="NS",
+            response=None,
+            section="answer",
+            rr_owner=_norm_name(candidate),
+            rr_type="NS",
+            rr_value=target,
+            source_method=source_method,
+            resolver_or_server=nameserver,
+            response_class=DNSResponseClass.OWNER_MATCHING_ANSWER,
+            evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE,
+            finding_type=FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+            promotion_reason=(
+                f"Corroborated by ≥2 recursive resolvers "
+                f"({', '.join(resolvers_that_agreed)}); "
+                "direct authoritative verification was unavailable"
+            ),
+        )
+        records.append(
+            DiscoveredRecord(
+                fqdn=_norm_name(candidate),
+                record_type=RecordType.NS,
+                value=target,
+                source_method=source_method,
+                classification=FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+                confidence="low",
+                nameserver=nameserver,
+                ttl=None,
+                evidence_status=EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE,
+                evidence_trace=[trace],
+            )
+        )
+    return records
+
+
+def _verify_via_recursive_fallback(
+    candidate: str,
+    *,
+    recursive_resolvers: list[str],
+    send_query: SendQueryFn,
+    make_resolver: MakeResolverFn,
+    source_method: str,
+    log_sink: list[str] | None,
+    errors: list[str],
+    evidence_outcomes: list[EvidenceOutcome],
+) -> DelegationVerificationResult | None:
+    """Fallback path: query ≥2 recursive resolvers; promote only on NS agreement.
+
+    Returns *None* when fewer than 2 resolvers are configured or the agreement
+    check fails.  Callers must never invoke this when either auth path succeeded.
+    """
+    if len(recursive_resolvers) < 2:
+        return None
+
+    resolver_ns_sets: dict[str, frozenset[str]] = {}
+
+    for resolver_ip in recursive_resolvers:
+        resolver = make_resolver(resolver_ip)
+        response, transport_error = send_query(candidate, RecordType.NS, resolver)
+        if response is None or transport_error is not None:
+            continue
+        ns_entries = _collect_candidate_ns(response, candidate)
+        if not ns_entries:
+            continue
+        ns_set = frozenset(target.lower().rstrip(".") for _o, target, _t, _s in ns_entries)
+        if ns_set:
+            resolver_ns_sets[resolver_ip] = ns_set
+
+    if len(resolver_ns_sets) < 2:
+        msg = (
+            f"Delegation not verified for {candidate}: recursive fallback "
+            f"insufficient ({len(resolver_ns_sets)}/{len(recursive_resolvers)} "
+            "resolvers returned NS)"
+        )
+        if log_sink is not None:
+            log_sink.append(msg)
+        return None
+
+    all_ns_sets = list(resolver_ns_sets.values())
+    if not all(s == all_ns_sets[0] for s in all_ns_sets[1:]):
+        resolvers_str = ", ".join(resolver_ns_sets.keys())
+        msg = (
+            f"Delegation not verified for {candidate}: "
+            f"recursive resolvers disagreed on NS set ({resolvers_str})"
+        )
+        if log_sink is not None:
+            log_sink.append(msg)
+        return None
+
+    agreed_ns_set = all_ns_sets[0]
+    resolvers_that_agreed = list(resolver_ns_sets.keys())
+    nameserver_str = f"Resolver-corroborated: {', '.join(resolvers_that_agreed)}"
+    source = f"{source_method}/recursive_corroborated"
+
+    records = _records_from_recursive_corroboration(
+        candidate,
+        agreed_ns_set,
+        resolvers_that_agreed,
+        source_method=source,
+        nameserver=nameserver_str,
+    )
+
+    log_msg = (
+        f"Delegation corroborated for {_norm_name(candidate)} via recursive resolvers "
+        f"({', '.join(resolvers_that_agreed)}): "
+        "direct authoritative verification was unavailable"
+    )
+    if log_sink is not None:
+        log_sink.append(log_msg)
+    return DelegationVerificationResult(
+        verified=True,
+        method="recursive_corroborated",
+        response_class=None,
+        reason="",
+        matched_owner=_norm_name(candidate),
+        source_path="recursive_corroborated",
+        records=records,
+        log_message=log_msg,
+        errors=errors,
+        evidence_outcomes=evidence_outcomes,
+    )
+
+
 def _record_from_apex_soa(
     candidate: str,
     response: dns.message.Message,
@@ -256,12 +396,21 @@ def verify_delegated_child_zone(
     delegation_child_ns_hosts: list[str] | None = None,
     source_method: str = "delegation_verification",
     log_sink: list[str] | None = None,
+    recursive_resolvers: list[str] | None = None,
 ) -> DelegationVerificationResult:
     """Verify delegation for *candidate*; return structured result (fail-closed).
 
-    Only parent-side or candidate-apex authoritative paths may produce
-    ``delegated_child_zone`` or apex SOA findings.  Recursive resolver evidence
-    is never sufficient by itself.
+    Primary paths (authoritative, highest confidence):
+      1. Parent-side authoritative — parent NS returns owner-matching NS RRset.
+      2. Candidate-apex authoritative — child NS returns NS/SOA at the candidate apex.
+
+    Fallback path (lower confidence, only when both auth paths fail):
+      3. Recursive corroboration — ≥2 resolvers from *recursive_resolvers* agree on
+         the candidate NS set.  Produces ``delegated_child_zone_recursive``; never
+         counts as authoritative evidence.
+
+    Recursive resolver evidence NEVER satisfies any authoritative verification
+    assertion and will NEVER emit ``delegated_child_zone`` (Path 1/2 class).
     """
     _ = base_domain  # reserved for future parent-context rules (Ticket 26)
     candidate_norm = _norm_name(candidate)
@@ -471,6 +620,23 @@ def verify_delegated_child_zone(
                         evidence_trace=[ignored_trace],
                     )
                 )
+
+    # --- Path 3: Recursive corroboration fallback (auth paths exhausted) ------
+    # Fires only when both auth paths failed (no early return above).
+    # Requires ≥2 configured resolvers to agree; never produces DELEGATED_CHILD_ZONE.
+    if recursive_resolvers:
+        fallback = _verify_via_recursive_fallback(
+            candidate_norm,
+            recursive_resolvers=recursive_resolvers,
+            send_query=send_query,
+            make_resolver=make_resolver,
+            source_method=source_method,
+            log_sink=log_sink,
+            errors=errors,
+            evidence_outcomes=evidence_outcomes,
+        )
+        if fallback is not None:
+            return fallback
 
     if last_log:
         if log_sink is not None:
