@@ -646,6 +646,51 @@ def _enumeration_parent(candidate: str) -> str:
     return ".".join(parts[1:]) if len(parts) > 1 else candidate
 
 
+def _suppression_match_detail(
+    candidate_records: list,  # list[DiscoveredRecord]
+    attestation: WildcardAttestation,
+) -> tuple[str, list[str]]:
+    """Compute matched RR type(s) and values at wildcard-suppression time (R4c).
+
+    Observational only — does not affect any promote/suppress decision.
+    Called only after candidate_differentiates() returned None.
+
+    Returns:
+        matched_rrtype  — comma-separated RR type(s) that matched (e.g. "A")
+        matched_values  — de-duplicated list of values that matched the signature
+    """
+    seen_type_list: list[str] = []
+    seen_type_set: set[str] = set()
+    value_list: list[str] = []
+    value_set: set[str] = set()
+
+    for record in candidate_records:
+        rr_type = record.record_type.value if record.record_type else None
+        if rr_type is None:
+            continue
+        if rr_type not in attestation.type_signatures:
+            continue
+        candidate_value = record.value or ""
+        if not candidate_value:
+            continue
+
+        # Mirror the containment/membership checks from candidate_differentiates().
+        if rr_type in ("A", "AAAA"):
+            matched = candidate_value in attestation.address_pool
+        else:
+            matched = candidate_value in attestation.type_signatures[rr_type]
+
+        if matched:
+            if rr_type not in seen_type_set:
+                seen_type_list.append(rr_type)
+                seen_type_set.add(rr_type)
+            if candidate_value not in value_set:
+                value_list.append(candidate_value)
+                value_set.add(candidate_value)
+
+    return ",".join(seen_type_list), value_list
+
+
 def _unique_fifth_level_parents(candidates: list[str], base_domain: str) -> set[str]:
     parents: set[str] = set()
     for candidate in candidates:
@@ -1671,13 +1716,20 @@ def _test_candidates(
                         # Gate code path: candidate_differentiates returned None,
                         # so the promotion branch is not taken and the outcome below
                         # routes the candidate to the diagnostics sheet via T31 routing.
-                        result.evidence_outcomes.append(
-                            outcome_suppressed_wildcard_match(
-                                candidate,
-                                parent=parent_key,
-                                source_method="generated_candidate",
-                            )
+                        suppressed_outcome = outcome_suppressed_wildcard_match(
+                            candidate,
+                            parent=parent_key,
+                            source_method="generated_candidate",
                         )
+                        # R4c: record match detail (observational — does not change
+                        # the gate decision; _suppression_match_detail mirrors the
+                        # containment/membership checks from candidate_differentiates).
+                        _matched_type, _matched_vals = _suppression_match_detail(
+                            all_candidate_evidence, attestation
+                        )
+                        suppressed_outcome.matched_rrtype = _matched_type or None
+                        suppressed_outcome.matched_values = _matched_vals or None
+                        result.evidence_outcomes.append(suppressed_outcome)
                         for item in other_findings:
                             item.attestation_status = attestation.status.value
                         other_findings = []

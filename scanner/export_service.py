@@ -1697,6 +1697,11 @@ def _wildcard_outcome_all_fields(outcome: EvidenceOutcome) -> dict[str, str]:
     status = outcome.evidence_status
     parent_scope = _parent_scope_from_fqdn(outcome.fqdn)
     if status == EvidenceStatus.SUPPRESSED_WILDCARD_MATCH:
+        # R4c: read match detail recorded at suppression time.
+        matched_rrtype_str = outcome.matched_rrtype or ""
+        matched_values_str = (
+            ",".join(outcome.matched_values) if outcome.matched_values else ""
+        )
         return {
             # §7 subset shared with findings
             "wildcard_attestation_status": "wildcard_detected",
@@ -1706,8 +1711,8 @@ def _wildcard_outcome_all_fields(outcome: EvidenceOutcome) -> dict[str, str]:
             "wildcard_signature_matched": "true",
             "wildcard_differentiation_reason": "",
             # §8 diagnostic-only
-            "matched_rrtype": "",
-            "matched_values": "",
+            "matched_rrtype": matched_rrtype_str,
+            "matched_values": matched_values_str,
             "diagnostic_reason": "suppressed_as_wildcard_only",
         }
     if status == EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE:
@@ -2683,14 +2688,16 @@ def build_json_document(result: ScanRunResult) -> dict:
                     "source": _map_source_method(outcome.source_method),
                     "detail": outcome.detail,
                     "evidence_trace": traces_to_dicts(outcome.evidence_trace),
-                    # §8 wildcard diagnostic fields (R4b)
+                    # §8 wildcard diagnostic fields (R4b/R4c)
                     "wildcard_attestation_status": wc_all["wildcard_attestation_status"],
                     "wildcard_parent_scope": wc_all["wildcard_parent_scope"],
                     "wildcard_probe_count": int(MIN_PROBE_COUNT) if wc_all["wildcard_probe_count"] else None,
                     "wildcard_rrtypes_tested": list(ATTESTATION_PROBE_TYPES) if wc_all["wildcard_rrtypes_tested"] else None,
                     "wildcard_signature_matched": wc_all["wildcard_signature_matched"],
                     "matched_rrtype": wc_all["matched_rrtype"] or None,
-                    "matched_values": wc_all["matched_values"] or None,
+                    # R4c: for SUPPRESSED outcomes pass the raw list from the model so JSON
+                    # consumers get a proper array; for all others keep None.
+                    "matched_values": outcome.matched_values if outcome.matched_values else (None if not wc_all["matched_values"] else wc_all["matched_values"]),
                     "diagnostic_reason": diag_reason or None,
                     # §9 wording
                     "wildcard_note": wc_note,
