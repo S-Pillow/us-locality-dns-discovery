@@ -1,5 +1,10 @@
 # US Locality DNS Discovery Tool — dependencies
 # Python 3.11+ required (stdlib Tkinter used for GUI)
+#
+# Tested runtime baseline (R5 spike, 2026-06-27):
+#   Python 3.14.6 / CPython / Windows 11
+#   dnspython 2.8.0 — SMOKE_PASS 4/4 (UDP+TCP, SOA+A queries; real network)
+#   Exact pin: see requirements.lock
 
 dnspython>=2.6.0
 openpyxl>=3.1.0
