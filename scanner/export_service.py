@@ -277,6 +277,8 @@ CSV_COLUMNS = [
     "wildcard_rrtypes_tested",
     "wildcard_signature_matched",
     "wildcard_differentiation_reason",
+    # D2 provenance
+    "verification_method",
 ]
 
 # Diagnostics CSV extends findings columns with §8-only wildcard fields (R4b).
@@ -646,6 +648,7 @@ DISPLAY_EVIDENCE_VALUE = {
 DISPLAY_NAME_TYPE = {
     "base_domain": "Base domain",
     "delegated_child_zone": "Delegated child zone",
+    "delegated_child_zone_recursive": "Delegated child zone (resolver-corroborated)",
     "organizational_child_name": "Organizational child name",
     "service_hostname": "Service hostname",
     "generic_hostname": "Generic hostname",
@@ -655,6 +658,12 @@ DISPLAY_NAME_TYPE = {
     "unknown_child_hostname": "Unknown child hostname",
 }
 
+# Criterion-8 wording for resolver-corroborated delegation findings.
+RECURSIVE_DELEGATION_WORDING = (
+    "Delegation evidence was corroborated through recursive resolvers; "
+    "direct authoritative verification was unavailable."
+)
+
 
 @dataclass
 class DnsEvidenceContext:
@@ -662,6 +671,7 @@ class DnsEvidenceContext:
 
     cname_targets: dict[str, str] = field(default_factory=dict)
     direct_delegation: set[str] = field(default_factory=set)
+    recursive_direct_delegation: set[str] = field(default_factory=set)
 
 
 def _display_known_domain(value: str) -> str:
@@ -708,6 +718,7 @@ def _build_dns_evidence_context(domain_result: DomainScanResult) -> DnsEvidenceC
     base = domain_result.domain
     cname_targets: dict[str, str] = {}
     direct_delegation: set[str] = set()
+    recursive_direct_delegation: set[str] = set()
 
     for record in domain_result.records:
         fqdn = normalize_domain_name(record.fqdn)
@@ -721,6 +732,11 @@ def _build_dns_evidence_context(domain_result: DomainScanResult) -> DnsEvidenceC
                 direct_delegation.add(fqdn)
             continue
 
+        if record.classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE:
+            if record.record_type == RecordType.NS and _is_child_name(fqdn, base):
+                recursive_direct_delegation.add(fqdn)
+            continue
+
         if record.classification == FindingClassification.ZONE_SOA_DISCOVERED:
             if _is_child_name(fqdn, base):
                 direct_delegation.add(fqdn)
@@ -730,11 +746,19 @@ def _build_dns_evidence_context(domain_result: DomainScanResult) -> DnsEvidenceC
             if _is_child_name(fqdn, base):
                 direct_delegation.add(fqdn)
 
-    return DnsEvidenceContext(cname_targets=cname_targets, direct_delegation=direct_delegation)
+    return DnsEvidenceContext(
+        cname_targets=cname_targets,
+        direct_delegation=direct_delegation,
+        recursive_direct_delegation=recursive_direct_delegation,
+    )
 
 
 def _has_direct_delegation(fqdn: str, ctx: DnsEvidenceContext) -> bool:
     return normalize_domain_name(fqdn) in ctx.direct_delegation
+
+
+def _has_recursive_delegation(fqdn: str, ctx: DnsEvidenceContext) -> bool:
+    return normalize_domain_name(fqdn) in ctx.recursive_direct_delegation
 
 
 def _cname_target_for(fqdn: str, ctx: DnsEvidenceContext) -> str | None:
@@ -780,11 +804,17 @@ def _why_for_child_name(
     if known_domain and name_type == "delegated_child_zone":
         return "Already listed in the system and confirmed in DNS."
 
+    if known_domain and name_type == "delegated_child_zone_recursive":
+        return f"Already listed in the system. {RECURSIVE_DELEGATION_WORDING}"
+
     if known_domain:
         return "Already listed in the system and confirmed in DNS."
 
     if name_type == "delegated_child_zone":
         return "New delegated child domain found in live DNS and not listed in the system input."
+
+    if name_type == "delegated_child_zone_recursive":
+        return f"New delegated child domain (resolver-corroborated). {RECURSIVE_DELEGATION_WORDING}"
 
     if name_type == "generic_hostname":
         return (
@@ -822,9 +852,22 @@ def _why_for_domain_summary(
 
     new_count = int(comparison.get("new_child_domains_count", 0))
     new_delegated_count = int(comparison.get("new_delegated_domains_count", 0))
+    new_recursive_delegated_count = int(comparison.get("new_recursive_delegated_domains_count", 0))
     validated_count = int(comparison.get("known_domains_validated_count", 0))
 
-    if evidence_value == "strong" or new_delegated_count > 0:
+    if new_delegated_count > 0:
+        return (
+            "Tool found NS/SOA evidence for a new delegated child zone not listed "
+            "in the system input."
+        )
+
+    if new_recursive_delegated_count > 0:
+        return (
+            "Tool found a resolver-corroborated delegated child zone not listed in the "
+            f"system input. {RECURSIVE_DELEGATION_WORDING}"
+        )
+
+    if evidence_value == "strong":
         return (
             "Tool found NS/SOA evidence for a new delegated child zone not listed "
             "in the system input."
@@ -861,16 +904,20 @@ def _why_for_domain_summary(
 
 def _collect_dns_discovered_children(
     domain_result: DomainScanResult,
-) -> tuple[set[str], set[str], bool]:
+) -> tuple[set[str], set[str], set[str], bool]:
     """
-    Return DNS-discovered child names, delegated child zone names, and base-only flag.
+    Return DNS-discovered child names, authoritative delegated zones,
+    resolver-corroborated delegated zones, and base-only flag.
 
-    Child names come from standard_record, delegated_child_zone, zone_soa_discovered
-    (below base), and axfr_success (below base).
+    ``delegated_children`` contains only authoritative (DELEGATED_CHILD_ZONE)
+    findings; ``recursive_delegated_children`` contains the lower-confidence
+    resolver-corroborated (DELEGATED_CHILD_ZONE_RECURSIVE) findings.
+    The two sets are never merged so authoritative counts remain unaffected.
     """
     base = domain_result.domain
     child_names: set[str] = set()
     delegated_children: set[str] = set()
+    recursive_delegated_children: set[str] = set()
     base_evidence = False
 
     for record in domain_result.records:
@@ -907,6 +954,12 @@ def _collect_dns_discovered_children(
                 delegated_children.add(fqdn)
             continue
 
+        if classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE:
+            if _is_child_name(fqdn, base):
+                child_names.add(fqdn)
+                recursive_delegated_children.add(fqdn)
+            continue
+
         if classification == FindingClassification.STANDARD_RECORD:
             if _is_child_name(fqdn, base):
                 child_names.add(fqdn)
@@ -920,7 +973,7 @@ def _collect_dns_discovered_children(
             continue
 
     dns_discovered_base_only = base_evidence and not child_names
-    return child_names, delegated_children, dns_discovered_base_only
+    return child_names, delegated_children, recursive_delegated_children, dns_discovered_base_only
 
 
 def _extract_leftmost_label(fqdn: str, base_domain: str) -> str:
@@ -952,6 +1005,11 @@ def _classify_name_type(
             if known and target in known:
                 return "alias_to_known_domain"
 
+    # Recursive-corroborated takes precedence over generic labels, but
+    # authoritative delegated_child_zone is preferred when both exist.
+    if ctx is not None and _has_recursive_delegation(fqdn, ctx) and not is_delegated:
+        return "delegated_child_zone_recursive"
+
     if is_delegated:
         return "delegated_child_zone"
     label = _extract_leftmost_label(fqdn, base_domain)
@@ -977,7 +1035,7 @@ def _evidence_value_for_child_name(
         return "validation_only"
     if name_type in {"alias_to_known_domain", "alias_to_external_target"}:
         return "limited"
-    if is_delegated or name_type == "delegated_child_zone" or has_axfr_child:
+    if is_delegated or name_type in {"delegated_child_zone", "delegated_child_zone_recursive"} or has_axfr_child:
         return "strong"
     if name_type in {"organizational_child_name", "service_hostname"}:
         return "moderate"
@@ -1060,8 +1118,8 @@ def _build_child_domain_inventory(
 ) -> dict[str, str | int | bool | set[str]]:
     known = known_child_domains_from_record(domain_result.input_record)
     ctx = _build_dns_evidence_context(domain_result)
-    discovered, delegated_discovered, dns_discovered_base_only = _collect_dns_discovered_children(
-        domain_result
+    discovered, delegated_discovered, recursive_delegated_discovered, dns_discovered_base_only = (
+        _collect_dns_discovered_children(domain_result)
     )
     axfr_new = _axfr_child_names_not_in_input(domain_result, known)
 
@@ -1081,6 +1139,11 @@ def _build_child_domain_inventory(
         name
         for name, meta in per_name.items()
         if meta["known_domain"] == "no" and meta["name_type"] == "delegated_child_zone"
+    }
+    new_recursive_delegated = {
+        name
+        for name, meta in per_name.items()
+        if meta["known_domain"] == "no" and meta["name_type"] == "delegated_child_zone_recursive"
     }
     new_generic = {
         name
@@ -1123,6 +1186,8 @@ def _build_child_domain_inventory(
         "new_child_domains_count": len(new_children),
         "new_delegated_domains_found": _join_domain_list(new_delegated),
         "new_delegated_domains_count": len(new_delegated),
+        "new_recursive_delegated_domains_found": _join_domain_list(new_recursive_delegated),
+        "new_recursive_delegated_domains_count": len(new_recursive_delegated),
         "new_generic_hostnames_found": _join_domain_list(new_generic),
         "new_generic_hostnames_count": len(new_generic),
         "new_technical_hostnames_found": _join_domain_list(new_technical),
@@ -1133,6 +1198,7 @@ def _build_child_domain_inventory(
         "_per_name": per_name,
         "_new_children_set": new_children,
         "_new_delegated_set": new_delegated,
+        "_new_recursive_delegated_set": new_recursive_delegated,
         "_dns_discovered_base_only": dns_discovered_base_only,
         "_known_set": known,
         "_dns_ctx": ctx,
@@ -1425,6 +1491,15 @@ def _map_confidence(value: str) -> str:
     return mapping.get(value, "unknown")
 
 
+def _verification_method_for(record: DiscoveredRecord) -> str:
+    """Return a stable verification_method string for delegation findings."""
+    if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+        return "authoritative"
+    if record.classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE:
+        return "recursive_corroborated"
+    return ""
+
+
 def _map_source(record: DiscoveredRecord) -> str:
     mapping = {
         "recursive_resolver": "recursive",
@@ -1449,7 +1524,10 @@ def _domain_has_scan_error(domain_result: DomainScanResult) -> bool:
 
 
 def _is_dns_activity_record(record: DiscoveredRecord) -> bool:
-    if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
+    if record.classification in {
+        FindingClassification.DELEGATED_CHILD_ZONE,
+        FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+    }:
         return False
     if record.classification in {
         FindingClassification.BASE_ZONE_EXISTS,
@@ -1469,6 +1547,7 @@ def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
         "authoritative_ns": 0,
         "base_zone_exists": 0,
         "delegated_child_zones": 0,
+        "delegated_child_zones_recursive": 0,
         "dns_names_with_records": 0,
         "standard_records": 0,
         "axfr_success": 0,
@@ -1479,6 +1558,7 @@ def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
     }
     dns_activity_names: set[str] = set()
     delegated_names: set[str] = set()
+    delegated_recursive_names: set[str] = set()
     base_has_zone = False
 
     for record in domain_result.records:
@@ -1506,6 +1586,8 @@ def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
 
         if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
             delegated_names.add(record.fqdn)
+        elif record.classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE:
+            delegated_recursive_names.add(record.fqdn)
         elif _is_dns_activity_record(record):
             dns_activity_names.add(record.fqdn)
 
@@ -1525,6 +1607,7 @@ def _domain_summary_counts(domain_result: DomainScanResult) -> dict[str, int]:
             base_has_zone = True
 
     counts["delegated_child_zones"] = len(delegated_names)
+    counts["delegated_child_zones_recursive"] = len(delegated_recursive_names)
     counts["dns_names_with_records"] = len(dns_activity_names)
     counts["base_zone_exists_flag"] = 1 if base_has_zone else 0
     return counts
@@ -1592,7 +1675,11 @@ def _should_emit_no_records_row(domain_result: DomainScanResult, counts: dict[st
         return False
     if counts["base_zone_exists_flag"]:
         return False
-    if counts["delegated_child_zones"] > 0 or counts["dns_names_with_records"] > 0:
+    if (
+        counts["delegated_child_zones"] > 0
+        or counts.get("delegated_child_zones_recursive", 0) > 0
+        or counts["dns_names_with_records"] > 0
+    ):
         return False
     if counts["base_domain_records"] > 0 or counts["authoritative_ns"] > 0:
         return False
@@ -1859,11 +1946,13 @@ def _base_has_discovered_records(domain_result: DomainScanResult) -> bool:
 def _determine_scan_status(domain_result: DomainScanResult, counts: dict[str, int]) -> str:
     has_error = _domain_has_scan_error(domain_result)
     has_delegated = counts["delegated_child_zones"] > 0
+    has_recursive_delegated = counts.get("delegated_child_zones_recursive", 0) > 0
     has_dns = counts["dns_names_with_records"] > 0
     has_base_zone = bool(counts["base_zone_exists_flag"])
     has_base_records = counts["base_domain_records"] > 0 or counts["authoritative_ns"] > 0
     has_meaningful = (
         has_delegated
+        or has_recursive_delegated
         or has_dns
         or has_base_zone
         or has_base_records
@@ -1873,6 +1962,8 @@ def _determine_scan_status(domain_result: DomainScanResult, counts: dict[str, in
     if counts["axfr_success"] > 0:
         return SCAN_STATUS_AXFR
     if has_delegated:
+        return SCAN_STATUS_DELEGATED_CHILD
+    if has_recursive_delegated and not has_dns:
         return SCAN_STATUS_DELEGATED_CHILD
     if has_error and has_dns:
         return SCAN_STATUS_DNS_ACTIVITY_WITH_ERRORS
@@ -1913,6 +2004,27 @@ def _evidence_summary(domain_result: DomainScanResult, counts: dict[str, int]) -
             parts.append(f"Delegated child zone discovered: {sample} has NS records.")
         else:
             parts.append(f"Delegated child zones discovered: {', '.join(unique)}{suffix}")
+
+    recursive_delegated = list(
+        dict.fromkeys(
+            record.fqdn
+            for record in domain_result.records
+            if record.classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE
+        )
+    )
+    if recursive_delegated:
+        unique_r = recursive_delegated[:5]
+        suffix_r = "..." if len(recursive_delegated) > 5 else ""
+        if len(unique_r) == 1:
+            parts.append(
+                f"Resolver-corroborated delegated child zone: {unique_r[0]}. "
+                "Direct authoritative verification was unavailable."
+            )
+        else:
+            parts.append(
+                f"Resolver-corroborated delegated child zones: {', '.join(unique_r)}{suffix_r}. "
+                "Direct authoritative verification was unavailable."
+            )
 
     dns_names = sorted(
         {
@@ -2060,6 +2172,8 @@ def build_csv_rows(result: ScanRunResult) -> list[dict[str, str]]:
                     "error": _record_error(record),
                     "wordlist_sources": wordlist_sources,
                     "notes": _finding_notes(record, notes),
+                    # D2 provenance
+                    "verification_method": _verification_method_for(record),
                 }
             )
 
@@ -2136,7 +2250,11 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
             if not _include_record_in_export(record, domain_result.domain):
                 continue
             status = resolve_evidence_status(record, domain_result.domain)
-            if not is_confirmed_evidence_status(status):
+            # Include both authoritative confirmed and resolver-corroborated findings.
+            # Recursive findings are kept distinct via finding_type, confidence, and
+            # verification_method — they are never summed into authoritative counts.
+            from scanner.evidence_status import is_recursive_delegation_status  # noqa: PLC0415
+            if not is_confirmed_evidence_status(status) and not is_recursive_delegation_status(status):
                 continue
             child_meta = _finding_child_metadata(
                 domain_result,
@@ -2164,6 +2282,8 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
                     "wordlist_sources": wordlist_sources,
                     "notes": _finding_notes(record, notes),
                     **_wildcard_finding_fields(record),  # §7 (R4b)
+                    # D2 provenance
+                    "verification_method": _verification_method_for(record),
                 }
             )
 
@@ -2191,7 +2311,10 @@ def build_diagnostics_rows(result: ScanRunResult) -> list[dict[str, str]]:
             if not _include_record_in_export(record, domain_result.domain):
                 continue
             status = resolve_evidence_status(record, domain_result.domain)
-            if is_confirmed_evidence_status(status):
+            # Exclude both authoritative confirmed and recursive-corroborated findings;
+            # both appear on the Findings sheet, not here.
+            from scanner.evidence_status import is_recursive_delegation_status  # noqa: PLC0415
+            if is_confirmed_evidence_status(status) or is_recursive_delegation_status(status):
                 continue
             child_meta = _finding_child_metadata(
                 domain_result,
@@ -2604,6 +2727,8 @@ def _finding_to_dict(
         "wildcard_differentiation_reason": wc["wildcard_differentiation_reason"],
         # §9 wording
         "wildcard_note": WILDCARD_WORDING_DETECTED_PROMOTED if record.attestation_status == "detected" else "",
+        # D2 provenance
+        "verification_method": _verification_method_for(record),
     }
 
 
