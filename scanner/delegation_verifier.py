@@ -16,6 +16,7 @@ through an allowed path:
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -40,6 +41,13 @@ SendQueryFn = Callable[
 ResolveNsIpsFn = Callable[[str], list[str]]
 MakeResolverFn = Callable[[str | None], object]
 GetParentNsHostsFn = Callable[[str], list[str]]
+
+# Reason string emitted when the auth-path wall-clock budget is exhausted before
+# authoritative verification completes.  Used as DelegationVerificationResult.reason
+# and in log messages so the record is unambiguously "inconclusive", never "absent".
+AUTH_BUDGET_EXCEEDED_REASON = (
+    "authoritative verification exceeded budget; recursive fallback used"
+)
 
 
 def _norm_name(name: str) -> str:
@@ -88,7 +96,7 @@ class DelegationVerificationResult:
     """Structured outcome of delegation verification for one candidate."""
 
     verified: bool
-    method: str  # parent_authoritative_ns | candidate_apex_ns | candidate_apex_soa | none
+    method: str  # parent_authoritative_ns | candidate_apex_ns | candidate_apex_soa | auth_budget_exceeded | none
     response_class: DNSResponseClass | None
     reason: str
     matched_owner: str | None
@@ -97,6 +105,9 @@ class DelegationVerificationResult:
     log_message: str = ""
     errors: list[str] = field(default_factory=list)
     evidence_outcomes: list[EvidenceOutcome] = field(default_factory=list)
+    # 29C: True when the auth path was cut short by the wall-clock budget.
+    # Callers must treat this as "inconclusive", never as "authoritative absence".
+    auth_budget_exceeded: bool = False
 
 
 def _collect_candidate_ns(
@@ -417,6 +428,7 @@ def verify_delegated_child_zone(
     log_sink: list[str] | None = None,
     recursive_resolvers: list[str] | None = None,
     unreachable_ns_ips: set[str] | None = None,
+    auth_budget_seconds: float | None = None,
 ) -> DelegationVerificationResult:
     """Verify delegation for *candidate*; return structured result (fail-closed).
 
@@ -431,6 +443,11 @@ def verify_delegated_child_zone(
 
     Recursive resolver evidence NEVER satisfies any authoritative verification
     assertion and will NEVER emit ``delegated_child_zone`` (Path 1/2 class).
+
+    *auth_budget_seconds* (29C): when set, caps the wall-clock time spent on Paths 1
+    and 2.  If the budget expires, those paths stop and Path 3 (recursive) still runs
+    normally outside the cap.  A budget-hit is recorded as
+    ``method="auth_budget_exceeded"`` — NEVER as authoritative absence.
     """
     _ = base_domain  # reserved for future parent-context rules (Ticket 26)
     candidate_norm = _norm_name(candidate)
@@ -438,6 +455,15 @@ def verify_delegated_child_zone(
     errors: list[str] = []
     evidence_outcomes: list[EvidenceOutcome] = []
     last_log = ""
+
+    # 29C: wall-clock budget for auth Paths 1 and 2 only.  Path 3 always runs
+    # outside this cap so the recursive fallback is never starved.
+    auth_deadline: float | None = (
+        time.monotonic() + auth_budget_seconds
+        if auth_budget_seconds is not None
+        else None
+    )
+    auth_budget_hit = False
 
     if not parent:
         msg = f"Delegation not verified for {candidate_norm}: no parent domain"
@@ -465,7 +491,11 @@ def verify_delegated_child_zone(
 
     # --- Path 1: parent-side authoritative NS owner match -------------------
     for ns_host in hosts:
+        if auth_budget_hit:
+            break
         for ns_ip in resolve_ns_ips(ns_host):
+            if auth_budget_hit:
+                break
             # 29B: skip IPs already proven unreachable this run.
             if unreachable_ns_ips is not None and ns_ip in unreachable_ns_ips:
                 if log_sink is not None:
@@ -474,8 +504,33 @@ def verify_delegated_child_zone(
                         "known unreachable this run (29B short-circuit)"
                     )
                 continue
+            # 29C: check budget before each auth query; scale the per-attempt
+            # timeout so that UDP + TCP together do not exceed the remaining budget.
             resolver = make_resolver(ns_ip)
+            if auth_deadline is not None:
+                remaining = auth_deadline - time.monotonic()
+                if remaining <= 0:
+                    auth_budget_hit = True
+                    if log_sink is not None:
+                        log_sink.append(
+                            f"Auth budget exceeded for {candidate_norm} at Path 1 "
+                            f"before {ns_host} ({ns_ip}); falling through to recursive path"
+                        )
+                    break
+                per_attempt = max(0.05, remaining / 2.0)
+                if hasattr(resolver, "timeout"):
+                    resolver.timeout = min(resolver.timeout, per_attempt)
+                if hasattr(resolver, "lifetime"):
+                    resolver.lifetime = min(resolver.lifetime, remaining)
             response, transport_error = send_query(candidate_norm, RecordType.NS, resolver)
+            # 29C: post-query budget check — if this query ran long, stop further auth work.
+            if auth_deadline is not None and not auth_budget_hit and time.monotonic() > auth_deadline:
+                auth_budget_hit = True
+                if log_sink is not None:
+                    log_sink.append(
+                        f"Auth budget exceeded for {candidate_norm} after querying "
+                        f"{ns_host} ({ns_ip}); falling through to recursive path"
+                    )
             # 29B: detect and cache the first ENETUNREACH for this IP.
             if (
                 unreachable_ns_ips is not None
@@ -541,12 +596,41 @@ def verify_delegated_child_zone(
     # --- Path 2: candidate-apex authoritative NS / SOA ----------------------
     child_ns_targets = list(dict.fromkeys(child_ns_targets + list(delegation_child_ns_hosts or [])))
     for child_host in child_ns_targets:
+        if auth_budget_hit:
+            break
         for child_ip in resolve_ns_ips(child_host):
+            if auth_budget_hit:
+                break
+            # 29C: check budget before Path 2 auth queries.
             resolver = make_resolver(child_ip)
+            if auth_deadline is not None:
+                remaining = auth_deadline - time.monotonic()
+                if remaining <= 0:
+                    auth_budget_hit = True
+                    if log_sink is not None:
+                        log_sink.append(
+                            f"Auth budget exceeded for {candidate_norm} at Path 2 "
+                            f"before {child_host} ({child_ip}); falling through to recursive path"
+                        )
+                    break
+                per_attempt = max(0.05, remaining / 2.0)
+                if hasattr(resolver, "timeout"):
+                    resolver.timeout = min(resolver.timeout, per_attempt)
+                if hasattr(resolver, "lifetime"):
+                    resolver.lifetime = min(resolver.lifetime, remaining)
             nameserver = f"{child_host} ({child_ip})"
 
             # NS at candidate apex
             ns_response, ns_error = send_query(candidate_norm, RecordType.NS, resolver)
+            # 29C: post-query budget check for Path 2 NS query.
+            if auth_deadline is not None and not auth_budget_hit and time.monotonic() > auth_deadline:
+                auth_budget_hit = True
+                if log_sink is not None:
+                    log_sink.append(
+                        f"Auth budget exceeded for {candidate_norm} after Path 2 NS query to "
+                        f"{child_host} ({child_ip}); falling through to recursive path"
+                    )
+                break
             if ns_error and "timeout" in ns_error.lower():
                 errors.append(ns_error)
             ns_verified, ns_rc, ns_reason, ns_entries = _evaluate_parent_side_response(
@@ -598,7 +682,17 @@ def verify_delegated_child_zone(
                     )
 
             # SOA at candidate apex (zone/apex evidence, not delegated_child_zone)
+            if auth_budget_hit:
+                break
             soa_response, soa_error = send_query(candidate_norm, RecordType.SOA, resolver)
+            # 29C: post-query budget check for Path 2 SOA query.
+            if auth_deadline is not None and not auth_budget_hit and time.monotonic() > auth_deadline:
+                auth_budget_hit = True
+                if log_sink is not None:
+                    log_sink.append(
+                        f"Auth budget exceeded for {candidate_norm} after Path 2 SOA query to "
+                        f"{child_host} ({child_ip}); falling through to recursive path"
+                    )
             if soa_error and "timeout" in soa_error.lower():
                 errors.append(soa_error)
             soa_rc = classify_dns_response(soa_response, candidate_norm, soa_error)
@@ -656,8 +750,14 @@ def verify_delegated_child_zone(
                 )
 
     # --- Path 3: Recursive corroboration fallback (auth paths exhausted) ------
-    # Fires only when both auth paths failed (no early return above).
+    # Fires after both auth paths — including when auth was budget-hit (29C).
+    # The cap is explicitly NOT applied here; Path 3 must always get a full shot
+    # so the recursive fallback is never starved by the auth budget.
     # Requires ≥2 configured resolvers to agree; never produces DELEGATED_CHILD_ZONE.
+    if auth_budget_hit and log_sink is not None:
+        log_sink.append(
+            f"Auth budget exceeded for {candidate_norm}: {AUTH_BUDGET_EXCEEDED_REASON}"
+        )
     if recursive_resolvers:
         fallback = _verify_via_recursive_fallback(
             candidate_norm,
@@ -670,21 +770,28 @@ def verify_delegated_child_zone(
             evidence_outcomes=evidence_outcomes,
         )
         if fallback is not None:
+            fallback.auth_budget_exceeded = auth_budget_hit
             return fallback
 
-    if last_log:
-        if log_sink is not None:
-            log_sink.append(last_log)
+    # No evidence from any path.  Choose method string to distinguish budget-hit
+    # inconclusive from true authoritative absence.
+    method = "auth_budget_exceeded" if auth_budget_hit else "none"
+    reason_str = AUTH_BUDGET_EXCEEDED_REASON if auth_budget_hit else last_log
+
+    if reason_str:
+        if not auth_budget_hit and log_sink is not None:
+            log_sink.append(reason_str)
         return DelegationVerificationResult(
             verified=False,
-            method="none",
+            method=method,
             response_class=None,
-            reason=last_log,
+            reason=reason_str,
             matched_owner=None,
             source_path="unknown",
-            log_message=last_log,
+            log_message=reason_str,
             errors=errors,
             evidence_outcomes=evidence_outcomes,
+            auth_budget_exceeded=auth_budget_hit,
         )
 
     msg = f"Delegation not verified for {candidate_norm}: no authoritative verification path"
@@ -692,7 +799,7 @@ def verify_delegated_child_zone(
         log_sink.append(msg)
     return DelegationVerificationResult(
         verified=False,
-        method="none",
+        method=method,
         response_class=None,
         reason=msg,
         matched_owner=None,
@@ -700,4 +807,5 @@ def verify_delegated_child_zone(
         log_message=msg,
         errors=errors,
         evidence_outcomes=evidence_outcomes,
+        auth_budget_exceeded=auth_budget_hit,
     )
