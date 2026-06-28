@@ -282,6 +282,9 @@ class ScanOptions:
     custom_wordlist_path: Optional[Path] = None
     attempt_axfr: bool = False
     query_authoritative_ns: bool = True
+    deep_rfc_branch_sweep: bool = False
+    """Tier 5 (Ticket 30): when True, test all 5th-level candidates under every RFC locality
+    branch regardless of apex or sentinel results.  Default off — Tiers 1–4 are used instead."""
 
 
 @dataclass

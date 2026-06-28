@@ -52,6 +52,8 @@ from scanner.parent_gating import (
     decide_parent_gating_from_probe_classes,
     decision_for_fourth_level_tested_without_evidence,
     decision_for_known_parent,
+    decision_for_rfc_branch_sentinel_hit,
+    decision_for_rfc_branch_sentinel_miss,
     decision_for_validated_parent,
     outcome_from_parent_gating_skip,
     probe_parent_response_classes,
@@ -131,6 +133,32 @@ CANDIDATE_RECORD_TYPES = (
 # Excluded: state, dni, isa, nsn, fed (federal/state-level, not locality branches),
 #           gen (generic, no clear US-locality evidence), mus (museum, archaic).
 FIFTH_LEVEL_BRANCHES: tuple[str, ...] = ("ci", "co", "k12", "cc", "tec", "pvt", "lib")
+# Set form for O(1) RFC-branch membership checks (Ticket 30).
+_RFC_BRANCH_SET: frozenset[str] = frozenset(FIFTH_LEVEL_BRANCHES)
+
+# Sentinel labels for RFC branch probing (Ticket 30, Tier 3).
+# A small high-signal set of civic/infrastructure names used to detect whether
+# an unvalidated RFC branch apex has live descendants before deciding to skip.
+# These names are probed with a single A query per label via the recursive
+# resolver; the first positive response opens the branch for full 5th-level
+# testing (Tier 4) and records the finding.
+RFC_SENTINEL_LABELS: tuple[str, ...] = (
+    "www",
+    "mail",
+    "mx",
+    "ns",
+    "portal",
+    "admin",
+    "school",
+    "district",
+    "library",
+    "police",
+    "fire",
+    "ems",
+    "clerk",
+)
+RFC_SENTINEL_PROBE_SOURCE = "rfc_sentinel_probe"
+
 FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
 KNOWN_CHILD_APEX_SOURCE = "known_child_apex_delegation"
 WILDCARD_PROBE_COUNT = 2
@@ -215,6 +243,7 @@ def apply_scan_profile(options: ScanOptions) -> ScanOptions:
             custom_wordlist_path=options.custom_wordlist_path,
             attempt_axfr=options.attempt_axfr,
             query_authoritative_ns=options.query_authoritative_ns,
+            deep_rfc_branch_sweep=options.deep_rfc_branch_sweep,
         )
     return ScanOptions(
         scan_profile=options.scan_profile,
@@ -229,6 +258,7 @@ def apply_scan_profile(options: ScanOptions) -> ScanOptions:
         custom_wordlist_path=options.custom_wordlist_path,
         attempt_axfr=options.attempt_axfr,
         query_authoritative_ns=options.query_authoritative_ns,
+        deep_rfc_branch_sweep=options.deep_rfc_branch_sweep,
     )
 
 
@@ -911,6 +941,138 @@ def _validate_fourth_level_parent(
         evidence_trace=parent_probe_traces,
     )
     _emit(f"    {decision.diagnostic_message}", progress, messages)
+    return decision
+
+
+def _is_rfc_branch_parent(parent_key: str, base_domain: str) -> bool:
+    """Return True if parent_key is a direct RFC-locality branch apex over base_domain.
+
+    For example, ``pvt.k12.pa.us`` with base_domain ``k12.pa.us`` → True because
+    the single label ``pvt`` is in ``_RFC_BRANCH_SET``.
+    """
+    base = _display_name(base_domain)
+    suffix = f".{base}"
+    if not parent_key.endswith(suffix):
+        return False
+    prefix = parent_key[: -len(suffix)]
+    return "." not in prefix and prefix in _RFC_BRANCH_SET
+
+
+_SENTINEL_POSITIVE_CLASSES = frozenset(
+    {
+        DNSResponseClass.OWNER_MATCHING_ANSWER,
+        DNSResponseClass.CNAME_ALIAS,
+        DNSResponseClass.REFERRAL_DELEGATION,
+    }
+)
+
+
+def _probe_rfc_branch_sentinel(
+    branch_apex: str,
+    base_domain: str,
+    resolver: dns.resolver.Resolver,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    messages: list[str],
+) -> str | None:
+    """Probe RFC_SENTINEL_LABELS under branch_apex for live DNS evidence (Ticket 30, Tier 3).
+
+    Issues a single A query per sentinel label via the recursive resolver.
+    Returns the first sentinel label that produces a positive DNS response, or
+    None if no sentinel name resolves.
+
+    Positive sentinel responses are recorded in result.records so that any
+    discovered names appear in the final report even if they are not in the
+    prefix wordlist.  No diagnostic EvidenceOutcome entries are emitted for
+    sentinel probes that find nothing — those are not findings.
+    """
+    for sentinel in RFC_SENTINEL_LABELS:
+        fqdn = f"{sentinel}.{branch_apex}"
+        response, transport_error = _send_dns_query(fqdn, RecordType.A, resolver)
+        rclass = classify_dns_response(response, fqdn, transport_error)
+        if rclass in _SENTINEL_POSITIVE_CLASSES:
+            # Positive hit — do a full record sweep and record the findings.
+            findings, _ = _query_records(
+                fqdn,
+                CANDIDATE_RECORD_TYPES,
+                resolver,
+                source_method=RFC_SENTINEL_PROBE_SOURCE,
+                classification=FindingClassification.STANDARD_RECORD,
+                base_domain=base_domain,
+                log_sink=messages,
+                evidence_outcomes=None,
+            )
+            for item in findings:
+                item.confidence = _confidence_for(
+                    wildcard_suspected, item.record_type, item.classification
+                )
+                result.records.append(item)
+            return sentinel
+    return None
+
+
+def _run_rfc_branch_tiered_probe(
+    parent: str,
+    base_domain: str,
+    resolver: dns.resolver.Resolver,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    progress: ProgressCallback | None,
+    messages: list[str],
+    unreachable_ns_ips: set[str] | None,
+) -> ParentGatingDecision:
+    """Tier 2/3/4 progressive probe for an unvalidated RFC branch apex (Ticket 30).
+
+    Tier 2 — apex probe: full ``_validate_fourth_level_parent`` check including
+    delegation evidence (aa-flagged or recursively-corroborated apex validates).
+
+    Tier 3 — sentinel probe: if the apex fails, test RFC_SENTINEL_LABELS under the
+    branch with single A queries via the recursive resolver.
+
+    Tier 4 — escalation: sentinel hit → allow_descendants=True, full 5th-level
+    testing proceeds.  Sentinel miss → heuristic-skip disclosure (not absence).
+    """
+    pk = _display_name(parent)
+
+    # Tier 2: full apex validation (delegation + record sweep).
+    apex_decision = _validate_fourth_level_parent(
+        parent,
+        domain=base_domain,
+        resolver=resolver,
+        result=result,
+        wildcard_suspected=wildcard_suspected,
+        progress=progress,
+        messages=messages,
+        unreachable_ns_ips=unreachable_ns_ips,
+    )
+    if apex_decision.allow_descendants:
+        return apex_decision
+
+    # Tier 3: apex did not validate — run the bounded sentinel probe.
+    _emit(
+        f"    RFC branch apex {parent} not validated; running Tier-3 sentinel probe "
+        f"({len(RFC_SENTINEL_LABELS)} names).",
+        progress,
+        messages,
+    )
+    sentinel_hit = _probe_rfc_branch_sentinel(
+        parent, base_domain, resolver, result, wildcard_suspected, messages
+    )
+
+    if sentinel_hit:
+        # Tier 4: sentinel hit → open the branch.
+        decision = decision_for_rfc_branch_sentinel_hit(pk, sentinel_hit=sentinel_hit)
+        _emit(
+            f"    RFC branch {parent} opened (Tier 4): sentinel "
+            f"'{sentinel_hit}.{parent}' found live DNS evidence.",
+            progress,
+            messages,
+        )
+    else:
+        # Sentinel miss → heuristic-skip with mandatory disclosure.
+        decision = decision_for_rfc_branch_sentinel_miss(pk)
+        _emit(f"    {decision.diagnostic_message}", progress, messages)
+
     return decision
 
 
@@ -2531,6 +2693,7 @@ def scan_domain(
         parent_decisions: dict[str, ParentGatingDecision] = {}
 
         apex_probed: set[str] = set()
+        rfc_branches_probed: dict[str, str] = {}  # pk → "tier2"|"tier3-hit"|"tier3-miss"|"tier5"
         for p in fifth_parents:
             pk = _display_name(p)
             if pk in known_input_parents:
@@ -2552,8 +2715,64 @@ def scan_domain(
                 if _name_has_usable_findings(p, result):
                     parent_passed.add(pk)
                     parent_decisions[pk] = decision_for_validated_parent(pk, record_count=0)
+                elif _is_rfc_branch_parent(pk, domain):
+                    # Ticket 30: RFC branch was tested in the 4th-level sweep but produced
+                    # no usable findings.  Fall through to the Tier 2-4 probing block below
+                    # by NOT setting parent_decisions[pk] here.
+                    pass
                 else:
                     parent_decisions[pk] = decision_for_fourth_level_tested_without_evidence(pk)
+            if pk not in parent_decisions and _is_rfc_branch_parent(pk, domain):
+                # Ticket 30 — Progressive RFC Branch Escalation (Tiers 2–5).
+                # Fires when an RFC branch apex either (a) was NOT tested in the 4th-level
+                # sweep at all, or (b) was tested but produced no usable findings (the
+                # elif above set parent_decisions[pk] only when findings exist).  Without
+                # this block, unfound RFC branches would reach the lazy _validate_fourth_level_parent
+                # path in _test_candidates with no disclosure when skipped.
+                if resolved_options.deep_rfc_branch_sweep:
+                    # Tier 5 (opt-in): open all RFC branches unconditionally.
+                    parent_passed.add(pk)
+                    parent_decisions[pk] = decision_for_validated_parent(pk, record_count=0)
+                    rfc_branches_probed[pk] = "tier5"
+                    _emit(
+                        f"    RFC branch {pk}: Tier-5 deep sweep enabled — opening unconditionally.",
+                        progress,
+                        messages,
+                    )
+                else:
+                    # Tiers 2–4: apex probe → sentinel probe → escalation or heuristic skip.
+                    decision = _run_rfc_branch_tiered_probe(
+                        p,
+                        domain,
+                        resolver=resolver,
+                        result=result,
+                        wildcard_suspected=wildcard_suspected,
+                        progress=progress,
+                        messages=messages,
+                        unreachable_ns_ips=unreachable_ns_ips,
+                    )
+                    parent_decisions[pk] = decision
+                    if decision.allow_descendants:
+                        parent_passed.add(pk)
+                        tier_tag = (
+                            "tier2"
+                            if decision.reason == "Parent validated with direct DNS evidence"
+                            else "tier3-hit"
+                        )
+                    else:
+                        tier_tag = "tier3-miss"
+                    rfc_branches_probed[pk] = tier_tag
+
+        if rfc_branches_probed:
+            opened = [k for k, v in rfc_branches_probed.items() if v != "tier3-miss"]
+            skipped = [k for k, v in rfc_branches_probed.items() if v == "tier3-miss"]
+            _emit(
+                f"  RFC branch sentinel probing: {len(rfc_branches_probed)} branch(es) probed; "
+                f"{len(opened)} opened, {len(skipped)} skipped by heuristic "
+                f"(heuristic skip ≠ proven absence).",
+                progress,
+                messages,
+            )
 
         additional_parent_checks = len(fifth_parents) - len(parent_decisions)
         _emit(
