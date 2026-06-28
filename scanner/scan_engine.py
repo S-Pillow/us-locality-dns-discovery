@@ -117,6 +117,7 @@ CANDIDATE_RECORD_TYPES = (
 
 FIFTH_LEVEL_BRANCHES = ("ci", "co")
 FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
+KNOWN_CHILD_APEX_SOURCE = "known_child_apex_delegation"
 WILDCARD_PROBE_COUNT = 2
 LOW_CONFIDENCE_TYPES = {RecordType.A, RecordType.AAAA, RecordType.CNAME}
 SOA_AUTHORITY_NOTE = (
@@ -886,6 +887,53 @@ def _validate_fourth_level_parent(
     )
     _emit(f"    {decision.diagnostic_message}", progress, messages)
     return decision
+
+
+def _probe_known_child_apex_delegation(
+    parent: str,
+    *,
+    domain: str,
+    result: DomainScanResult,
+    wildcard_suspected: bool,
+    messages: list[str],
+) -> None:
+    """Probe a known 4th-level domain's apex for delegation via D2's Path-3 only.
+
+    Authoritative paths are forced empty (``parent_ns_hosts=[]``, no
+    ``get_parent_ns_hosts``) so ``verify_delegated_child_zone`` falls
+    straight through to ``_verify_via_recursive_fallback``.  Any resulting
+    ``DELEGATED_CHILD_ZONE_RECURSIVE`` records are appended to *result* with
+    the same confidence logic used elsewhere for recursive findings.
+    """
+    delegation = verify_delegated_child_zone(
+        parent,
+        base_domain=domain,
+        send_query=_send_dns_query,
+        resolve_ns_ips=_resolve_nameserver_ips,
+        make_resolver=_make_resolver,
+        parent_ns_hosts=[],
+        source_method=KNOWN_CHILD_APEX_SOURCE,
+        log_sink=messages,
+        recursive_resolvers=list(RECURSIVE_FALLBACK_RESOLVERS),
+    )
+    result.evidence_outcomes.extend(delegation.evidence_outcomes)
+    ns_findings = [
+        item
+        for item in delegation.records
+        if item.classification == FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE
+    ]
+    if ns_findings:
+        for item in ns_findings:
+            # D2 already marks recursive records confidence="low"; preserve that.
+            # _confidence_for is wildcard-aware but only lowers auth findings.
+            result.records.append(item)
+        _emit(
+            f"    Known-child apex probe: {delegation.log_message or f'{parent} delegation confirmed (resolver-derived)'}",
+            None,
+            messages,
+        )
+    elif delegation.log_message:
+        _emit(f"    Known-child apex probe: {delegation.log_message}", None, messages)
 
 
 def _make_resolver(nameserver: str | None = None) -> dns.resolver.Resolver:
@@ -2410,11 +2458,24 @@ def scan_domain(
         parent_passed: set[str] = set()
         parent_decisions: dict[str, ParentGatingDecision] = {}
 
+        apex_probed: set[str] = set()
         for p in fifth_parents:
             pk = _display_name(p)
             if pk in known_input_parents:
                 parent_passed.add(pk)
                 parent_decisions[pk] = decision_for_known_parent(pk)
+                # D3: probe the apex of each known parent for recursive delegation.
+                # Each apex is probed at most once per domain run even if it appears
+                # as the parent of multiple 5th-level candidates.
+                if pk not in apex_probed:
+                    apex_probed.add(pk)
+                    _probe_known_child_apex_delegation(
+                        p,
+                        domain=domain,
+                        result=result,
+                        wildcard_suspected=wildcard_suspected,
+                        messages=messages,
+                    )
             elif pk in fourth_tested_names:
                 if _name_has_usable_findings(p, result):
                     parent_passed.add(pk)
