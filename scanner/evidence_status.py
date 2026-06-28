@@ -147,6 +147,27 @@ def outcome_ignored_unrelated_authority(
     )
 
 
+def outcome_nodata_parent_authority(
+    fqdn: str,
+    *,
+    source_method: str,
+    detail: str,
+    evidence_trace: list[EvidenceTrace] | None = None,
+) -> EvidenceOutcome:
+    """Ticket T32: NOERROR + no direct record + ancestor SOA in authority.
+
+    The name is in-zone but has no direct record and is NOT delegated.
+    This is NOT absence and NOT delegation — it is context only.
+    """
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.NODATA_PARENT_AUTHORITY,
+        source_method=source_method,
+        detail=detail,
+        evidence_trace=list(evidence_trace or []),
+    )
+
+
 def outcome_inconclusive_dns_failure(
     fqdn: str,
     *,

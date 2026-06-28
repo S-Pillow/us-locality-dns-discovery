@@ -29,6 +29,7 @@ from scanner.evidence_status import (
     outcome_candidate_tested,
     outcome_ignored_unrelated_authority,
     outcome_inconclusive_dns_failure,
+    outcome_nodata_parent_authority,
     outcome_suppressed_wildcard_match,
     outcome_withheld_wildcard_inconclusive,
     resolve_evidence_status,
@@ -1855,6 +1856,43 @@ def _query_records(
                         fqdn,
                         source_method=source_method,
                         detail=f"Unrelated authority while checking {record_type.value}",
+                        evidence_trace=[trace],
+                    )
+                )
+            continue
+
+        if rc == DNSResponseClass.NOERROR_NODATA_PARENT_AUTHORITY:
+            # Ticket T32: in-zone name with no direct record — not delegation, not absence.
+            nodata_detail = (
+                f"NODATA/parent-authority for {record_type.value}: "
+                f"{fqdn} is in the parent zone but has no direct record at this name "
+                "and is not a delegated child zone. "
+                "This does not prove descendants do not exist."
+            )
+            if log_sink is not None:
+                log_sink.append(
+                    f"NODATA-parent-authority while checking {fqdn} ({record_type.value}): "
+                    "in-zone, no direct record, not delegated"
+                )
+            trace = build_rejection_trace(
+                qname=fqdn,
+                qtype=record_type.value,
+                response=response,
+                transport_error=transport_error,
+                response_class=rc,
+                source_method=source_method,
+                resolver_or_server=resolver_label,
+                rejection_reason=f"NODATA/parent-authority for {record_type.value}",
+                evidence_status=EvidenceStatus.NODATA_PARENT_AUTHORITY,
+            )
+            if diagnostic_traces is not None:
+                diagnostic_traces.append(trace)
+            if evidence_outcomes is not None:
+                evidence_outcomes.append(
+                    outcome_nodata_parent_authority(
+                        fqdn,
+                        source_method=source_method,
+                        detail=nodata_detail,
                         evidence_trace=[trace],
                     )
                 )

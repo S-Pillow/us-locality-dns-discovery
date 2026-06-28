@@ -178,6 +178,10 @@ class EvidenceStatus(str, Enum):
     SKIPPED_BY_PARENT_GATING = "SKIPPED_BY_PARENT_GATING"
     INCONCLUSIVE_DNS_FAILURE = "INCONCLUSIVE_DNS_FAILURE"
     IGNORED_UNRELATED_AUTHORITY = "IGNORED_UNRELATED_AUTHORITY"
+    NODATA_PARENT_AUTHORITY = "NODATA_PARENT_AUTHORITY"
+    """Ticket T32: NOERROR + no direct record + ancestor SOA in authority.
+    The name is in-zone but has no direct record and is NOT delegated.
+    NOT absence; NOT delegation.  Context/diagnostic only."""
     NOT_RECORDED = "NOT_RECORDED"
     # Wildcard attestation outcomes (R4a)
     SUPPRESSED_WILDCARD_MATCH = "SUPPRESSED_WILDCARD_MATCH"
