@@ -459,27 +459,31 @@ def test_negative_ignored_does_not_promote_finding() -> None:
             return r, None
         return _make_response(fqdn, record_type.value, dns.rcode.NXDOMAIN), None
 
+    async def fake_send_async(fqdn, record_type, resolver):
+        return fake_send(fqdn, record_type, resolver)
+
     with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send):
-        with patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]):
-            with patch("scanner.scan_engine._get_parent_ns_hosts", return_value=PARENT_NS):
-                _test_candidates(
-                    candidates=[candidate],
-                    domain=BASE,
-                    resolver=_make_resolver(),
-                    result=domain_result,
-                    wildcard_suspected=False,
-                    progress=None,
-                    messages=[],
-                    cancel_check=None,
-                    progress_update=None,
-                    domain_index=1,
-                    domain_total=1,
-                    domains_completed=0,
-                    started_at=datetime.now(),
-                    phase=ScanPhase.TESTING_FOURTH_LEVEL,
-                    candidates_offset=0,
-                    candidates_total=1,
-                )
+        with patch("scanner.scan_engine._async_send_dns_query", side_effect=fake_send_async):
+            with patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]):
+                with patch("scanner.scan_engine._get_parent_ns_hosts", return_value=PARENT_NS):
+                    _test_candidates(
+                        candidates=[candidate],
+                        domain=BASE,
+                        resolver=_make_resolver(),
+                        result=domain_result,
+                        wildcard_suspected=False,
+                        progress=None,
+                        messages=[],
+                        cancel_check=None,
+                        progress_update=None,
+                        domain_index=1,
+                        domain_total=1,
+                        domains_completed=0,
+                        started_at=datetime.now(),
+                        phase=ScanPhase.TESTING_FOURTH_LEVEL,
+                        candidates_offset=0,
+                        candidates_total=1,
+                    )
 
     # Primary invariant: unrelated authority must never produce a confirmed finding.
     assert not any(

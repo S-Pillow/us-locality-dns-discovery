@@ -136,10 +136,15 @@ def _run_gated(
             return _servfail(fqdn + ".", record_type.value), None
         return resp, None
 
+    async def fake_send_async(fqdn: str, record_type: RecordType, resolver):
+        return fake_send(fqdn, record_type, resolver)
+
     pp: set[str] = set() if parent_passed is None else set(parent_passed)
     pd: dict[str, ParentGatingDecision] = dict(parent_decisions or {})
 
     with patch("scanner.scan_engine._send_dns_query", side_effect=fake_send), patch(
+        "scanner.scan_engine._async_send_dns_query", side_effect=fake_send_async
+    ), patch(
         "scanner.scan_engine._get_parent_ns_hosts", return_value=["ns.parent.example"]
     ), patch("scanner.scan_engine._resolve_nameserver_ips", return_value=["127.0.0.1"]):
         _test_candidates(

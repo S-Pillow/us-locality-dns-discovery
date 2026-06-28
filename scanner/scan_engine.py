@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import threading
 import time
@@ -10,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+import dns.asyncquery
 import dns.exception
 import dns.flags
 import dns.message
@@ -80,6 +82,11 @@ from scanner.models import (
 
 DNS_TIMEOUT = 3.0
 DNS_LIFETIME = 5.0
+# Hard wall-clock cap on the async parallel record-sweep per candidate.
+# The 6 queries run concurrently; worst-case latency is one query-lifetime
+# (UDP timeout + TCP timeout = 2 × DNS_TIMEOUT = 6s).  We add a 1-second
+# margin to absorb event-loop scheduling jitter without masking real hangs.
+PER_CANDIDATE_ASYNC_BUDGET = DNS_TIMEOUT * 2 + 1.0
 CANDIDATE_WARN_THRESHOLD = 250
 CANDIDATE_STRONG_WARN_THRESHOLD = 500
 
@@ -967,6 +974,118 @@ def _send_dns_query(
     return None, last_error
 
 
+# ---------------------------------------------------------------------------
+# Ticket 29 — async parallel record sweep
+# ---------------------------------------------------------------------------
+
+
+async def _async_send_dns_query(
+    fqdn: str,
+    record_type: RecordType,
+    resolver: dns.resolver.Resolver,
+) -> tuple[dns.message.Message | None, str | None]:
+    """Async counterpart of :func:`_send_dns_query` using ``dns.asyncquery``.
+
+    Mirrors the sync path exactly: UDP first, TCP fallback, same timeout.
+    """
+    qname = _dns_name(fqdn)
+    if not resolver.nameservers:
+        return None, f"{fqdn} {record_type.value}: no resolver nameservers configured"
+
+    query = dns.message.make_query(qname, record_type.value)
+    last_error: str | None = None
+    for nameserver in resolver.nameservers:
+        for query_fn in (dns.asyncquery.udp, dns.asyncquery.tcp):
+            try:
+                return await query_fn(query, nameserver, timeout=DNS_TIMEOUT), None
+            except dns.exception.Timeout:
+                last_error = f"{fqdn} {record_type.value}: timeout via {nameserver}"
+            except OSError as exc:
+                last_error = f"{fqdn} {record_type.value}: {exc}"
+            except dns.exception.DNSException as exc:
+                last_error = f"{fqdn} {record_type.value}: {exc.__class__.__name__}"
+    return None, last_error
+
+
+async def _async_query_records(
+    fqdn: str,
+    record_types: tuple[RecordType, ...],
+    resolver: dns.resolver.Resolver,
+    source_method: str,
+    classification: FindingClassification,
+    nameserver: str | None = None,
+    confidence: str = "normal",
+    base_domain: str | None = None,
+    log_sink: list[str] | None = None,
+    evidence_outcomes: list[EvidenceOutcome] | None = None,
+    response_classes: list[DNSResponseClass] | None = None,
+    diagnostic_traces: list | None = None,
+) -> tuple[list[DiscoveredRecord], list[str]]:
+    """Parallel record sweep: dispatch all *record_types* queries concurrently.
+
+    All queries are fired at once via ``asyncio.gather``; the wall-clock cost
+    is max(individual latencies) instead of sum.  Results are fed through the
+    unchanged :func:`_query_records` classifier via a pre-fetch injection.
+
+    A ``PER_CANDIDATE_ASYNC_BUDGET`` hard cap ensures no candidate can stall
+    indefinitely even when the resolver is unresponsive.
+
+    Claim-to-code (async dispatch/gather site):
+        tasks = [asyncio.create_task(_async_send_dns_query(...)) for rt in record_types]
+        raw_results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=...)
+    Results flow unchanged into _query_records via _send_fn=_prefetched_send.
+    """
+    # --- async dispatch / gather (the hot path) ---
+    tasks = [
+        asyncio.create_task(_async_send_dns_query(fqdn, rt, resolver))
+        for rt in record_types
+    ]
+    try:
+        raw_results: list[tuple[dns.message.Message | None, str | None]] = (
+            await asyncio.wait_for(
+                asyncio.gather(*tasks),
+                timeout=PER_CANDIDATE_ASYNC_BUDGET,
+            )
+        )
+    except asyncio.TimeoutError:
+        for t in tasks:
+            t.cancel()
+        budget_error = (
+            f"{fqdn}: per-candidate async budget exceeded "
+            f"({PER_CANDIDATE_ASYNC_BUDGET:.1f}s)"
+        )
+        return [], [budget_error]
+
+    # Build a pre-fetch map: RecordType → (response, error).
+    prefetch: dict[RecordType, tuple[dns.message.Message | None, str | None]] = dict(
+        zip(record_types, raw_results)
+    )
+
+    def _prefetched_send(
+        _fqdn: str,
+        rt: RecordType,
+        _resolver: dns.resolver.Resolver,
+    ) -> tuple[dns.message.Message | None, str | None]:
+        return prefetch[rt]
+
+    # --- classification through the unchanged sync path ---
+    return _query_records(
+        fqdn,
+        record_types,
+        resolver,
+        source_method=source_method,
+        classification=classification,
+        nameserver=nameserver,
+        confidence=confidence,
+        base_domain=base_domain,
+        log_sink=log_sink,
+        evidence_outcomes=evidence_outcomes,
+        response_classes=response_classes,
+        diagnostic_traces=diagnostic_traces,
+        _send_fn=_prefetched_send,
+    )
+
+
 def _owner_matches_queried(owner: str, queried: str) -> bool:
     """True when a DNS RRset owner is the queried name (normalized FQDN)."""
     return _names_match(owner, queried)
@@ -1170,6 +1289,7 @@ def _query_records(
     evidence_outcomes: list[EvidenceOutcome] | None = None,
     response_classes: list[DNSResponseClass] | None = None,
     diagnostic_traces: list | None = None,
+    _send_fn: Callable[..., tuple] | None = None,
 ) -> tuple[list[DiscoveredRecord], list[str]]:
     """Query *fqdn* for each of *record_types*; return findings and error strings.
 
@@ -1177,6 +1297,10 @@ def _query_records(
     before any finding creation code may inspect it.  Responses whose class
     does not permit findings are discarded; UNRELATED_AUTHORITY responses emit
     a diagnostic line to *log_sink* when provided.
+
+    *_send_fn* is an internal injection point used by the async parallel sweep
+    (Ticket 29): when provided it is called instead of :func:`_send_dns_query`,
+    allowing pre-fetched responses to flow through the unchanged classifier.
     """
     findings: list[DiscoveredRecord] = []
     errors: list[str] = []
@@ -1213,7 +1337,7 @@ def _query_records(
             # Delegated child-zone claims must go through verify_delegated_child_zone.
             continue
 
-        response, transport_error = _send_dns_query(fqdn, record_type, resolver)
+        response, transport_error = (_send_fn or _send_dns_query)(fqdn, record_type, resolver)
 
         rc = classify_dns_response(response, fqdn, transport_error)
         if response_classes is not None:
@@ -1659,21 +1783,24 @@ def _test_candidates(
                             )
                             continue
 
-            # --- 29A Change 2: cheap record sweep first; delegation walk on signal only ---
-            # Run the system-resolver record sweep unconditionally (cheap: no direct
-            # auth-server contacts, 6 serial queries per candidate).  The delegation
-            # walk's 6-auth-server NS loop fires only when the sweep already shows
-            # zone-apex SOA evidence — the signature of a real child delegation.
-            # Candidates with no SOA evidence skip all ~19 auth-server queries.
-            other_findings, candidate_errors = _query_records(
-                candidate,
-                CANDIDATE_RECORD_TYPES,
-                resolver,
-                source_method="generated_candidate",
-                classification=FindingClassification.STANDARD_RECORD,
-                base_domain=domain,
-                log_sink=messages,
-                evidence_outcomes=result.evidence_outcomes,
+            # --- Ticket 29: parallel record sweep (async dispatch/gather) ---
+            # All 6 CANDIDATE_RECORD_TYPES queries are fired concurrently via
+            # asyncio.gather, reducing per-candidate wall time from sum(latencies)
+            # to max(latencies).  Results flow through the unchanged classifier
+            # via _prefetched_send injection inside _async_query_records.
+            # The PER_CANDIDATE_ASYNC_BUDGET hard cap prevents any candidate
+            # from stalling the scan on a non-responsive resolver (Lawrence §3).
+            other_findings, candidate_errors = asyncio.run(
+                _async_query_records(
+                    candidate,
+                    CANDIDATE_RECORD_TYPES,
+                    resolver,
+                    source_method="generated_candidate",
+                    classification=FindingClassification.STANDARD_RECORD,
+                    base_domain=domain,
+                    log_sink=messages,
+                    evidence_outcomes=result.evidence_outcomes,
+                )
             )
 
             if _has_delegation_signal(other_findings):
