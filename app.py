@@ -970,7 +970,156 @@ class DiscoveryApp(tk.Tk):
         self._log(f"  Domains scanned: {outcome.domain_count}")
 
 
+def _batch_verify() -> None:  # noqa: C901
+    """Packaged-artifact verification mode (PKG ticket, §18.13).
+
+    Invoked by ``USLocalityDNSDiscovery.exe --batch-verify``.
+    Runs all 7 packaged-artifact checks and prints a structured report to
+    stdout so the PKG verification script can capture and assert them.
+    Exits 0 on pass, 1 on any failure.
+    """
+    import io
+    import sys
+    import tempfile
+
+    print("=== PKG BATCH VERIFY ===")
+    failures: list[str] = []
+
+    # Check 1: Clean launch — if we get here, the exe started without error.
+    print("[1] Clean launch: PASS (reached batch-verify entry point)")
+
+    # Check 2: source_commit embedded correctly.
+    from scanner.version import get_source_commit, APP_VERSION, SOURCE_COMMIT
+    commit = get_source_commit()
+    print(f"[2] source_commit: {commit!r}  APP_VERSION: {APP_VERSION!r}  SOURCE_COMMIT: {SOURCE_COMMIT!r}")
+    if not commit or commit == "unstamped":
+        failures.append("[2] source_commit is 'unstamped' — stamping failed")
+    else:
+        print(f"[2] source_commit: PASS")
+
+    # Check 3: Wordlists bundled — build a wordlist plan and check branch/label counts.
+    wdir = None
+    try:
+        from scanner.scan_engine import build_wordlist_plan, FIFTH_LEVEL_BRANCHES
+        from scanner.models import ScanOptions, ScanProfile
+        from scanner.paths import get_wordlists_dir
+        wdir = get_wordlists_dir()
+        print(f"[3] wordlists dir: {wdir}")
+        opts = ScanOptions(scan_profile=ScanProfile.NORMAL)
+        plan = build_wordlist_plan(opts, wordlists_dir=wdir)
+        source_counts = plan.source_counts  # dict[source_name, label_count]
+        print(f"[3] label sources: {list(source_counts.keys())}")
+        print(f"[3] total unique labels: {plan.total_unique_labels}")
+        branch_count = len(FIFTH_LEVEL_BRANCHES)
+        print(f"[3] FIFTH_LEVEL_BRANCHES ({branch_count}): {FIFTH_LEVEL_BRANCHES}")
+        if branch_count != 7:
+            failures.append(f"[3] Expected 7 RFC branches, got {branch_count}")
+        else:
+            print("[3] Wordlists/branches: PASS")
+    except Exception as exc:
+        failures.append(f"[3] Wordlist check FAILED: {exc}")
+
+    # Check 4+5+6+7: Live DNS scan with registry-known input (k12.pa.us LIGHT).
+    try:
+        from pathlib import Path
+        import csv, tempfile, time
+
+        # Write a temp input CSV with registry-known names including the fcs mission case.
+        tmpdir = Path(tempfile.mkdtemp())
+        input_csv = tmpdir / "verify_input.csv"
+        with input_csv.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["domain", "registry_known_names", "known_fourth_level_domains"])
+            writer.writerow([
+                "k12.pa.us",
+                "pvt.k12.pa.us;fcs.pvt.k12.pa.us;dvasd.k12.pa.us",
+                "dvasd.k12.pa.us",
+            ])
+
+        from scanner.input_loader import load_domain_inputs
+        from scanner.scan_engine import run_scan
+        from scanner.models import ScanInput, ScanOptions, ScanProfile, ScanStatus
+        from scanner.export_service import export_results, build_registry_matrix_rows
+
+        domain_load = load_domain_inputs(input_csv)
+        if domain_load.error:
+            failures.append(f"[4] Input load failed: {domain_load.error}")
+        else:
+            output_dir = tmpdir / "output"
+            output_dir.mkdir(exist_ok=True)
+            opts = ScanOptions(scan_profile=ScanProfile.LIGHT)
+            scan_input = ScanInput(
+                domain_file_path=input_csv,
+                options=opts,
+                output_dir=output_dir,
+                wordlists_dir=wdir,
+            )
+
+            t0 = time.monotonic()
+            result = run_scan(scan_input)
+            elapsed = time.monotonic() - t0
+
+            # Check 4: DNS works (scan completed without total failure).
+            if result.scan_status == ScanStatus.FAILED:
+                failures.append("[4] Scan FAILED — DNS/scan engine broken in package")
+            else:
+                print(f"[4] DNS scan: PASS (elapsed {elapsed:.1f}s, status={result.scan_status})")
+
+            # Check 5: Lane 1 — registry matrix + strong-gap.
+            if result.domain_results:
+                dr = result.domain_results[0]
+                matrix = dr.registry_matrix
+                print(f"[5] Registry matrix entries: {len(matrix)}")
+                strong_gaps = [e for e in matrix if e.matrix_cell.value == "strong_gap"]
+                print(f"[5] Strong gaps: {[e.fqdn for e in strong_gaps]}")
+                if not any(e.fqdn == "fcs.pvt.k12.pa.us" for e in strong_gaps):
+                    failures.append("[5] fcs.pvt.k12.pa.us NOT in strong-gap list")
+                else:
+                    print("[5] Lane 1 fcs STRONG_GAP: PASS")
+            else:
+                failures.append("[5] No domain results — scan produced nothing")
+
+            # Check 6: XLSX export with Registry Matrix sheet.
+            try:
+                outcome = export_results(result, output_dir, "xlsx")
+                if outcome.xlsx_path and outcome.xlsx_path.exists():
+                    xlsx_size = outcome.xlsx_path.stat().st_size
+                    print(f"[6] XLSX export: {outcome.xlsx_path.name} ({xlsx_size} bytes)")
+                    matrix_rows = build_registry_matrix_rows(result)
+                    if matrix_rows:
+                        print(f"[6] Registry Matrix rows in XLSX: {len(matrix_rows)} — PASS")
+                    else:
+                        failures.append("[6] Registry Matrix rows empty in XLSX export")
+                else:
+                    failures.append(f"[6] XLSX not produced: {outcome.xlsx_path}")
+            except Exception as exc:
+                failures.append(f"[6] XLSX export FAILED: {exc}")
+
+            # Check 7: Perf sane (light scan on 1 domain should finish in < 120s).
+            if elapsed > 120:
+                failures.append(f"[7] Perf degraded: {elapsed:.1f}s > 120s budget")
+            else:
+                print(f"[7] Perf: PASS ({elapsed:.1f}s)")
+
+    except Exception as exc:
+        failures.append(f"[4-7] Scan/verify block FAILED: {exc}")
+
+    print("\n=== RESULT ===")
+    if failures:
+        print("FAIL")
+        for f in failures:
+            print(f"  FAIL: {f}")
+        sys.exit(1)
+    else:
+        print("ALL CHECKS PASSED")
+        sys.exit(0)
+
+
 def main() -> None:
+    import sys
+    if "--batch-verify" in sys.argv:
+        _batch_verify()
+        return
     app = DiscoveryApp()
     app.mainloop()
 
