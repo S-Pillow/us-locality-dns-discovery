@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import re
 import threading
 import time
 import uuid
@@ -32,6 +33,7 @@ from scanner.evidence_status import (
     outcome_nodata_parent_authority,
     outcome_skipped_by_branch_timeout_heuristic,
     outcome_suppressed_wildcard_match,
+    outcome_withheld_parking_txt_backstop,
     outcome_withheld_wildcard_inconclusive,
     resolve_evidence_status,
     stamp_record_evidence_status,
@@ -172,6 +174,43 @@ FIFTH_LEVEL_PARENT_SOURCE = "fifth_level_parent_validation"
 KNOWN_CHILD_APEX_SOURCE = "known_child_apex_delegation"
 WILDCARD_PROBE_COUNT = 2
 LOW_CONFIDENCE_TYPES = {RecordType.A, RecordType.AAAA, RecordType.CNAME}
+
+# WC-FIX.1 §2B — parking / availability TXT pattern.
+# Matches the registrar-provisioned "domain may be available" TXT string that
+# i-theta.com / buddyns operators inject under parked zones.  Used as a
+# defense-in-depth backstop: even when wildcard detection returns CLEAN (or is
+# inconclusive), a TXT-only candidate whose only evidence is this string is NOT
+# promoted to CONFIRMED_ORDINARY_DNS_NAME.
+#
+# Matches (case-insensitive, substring): "may be available"
+# Examples caught:
+#   "This domain may be available. For information, contact us-dom2@i-theta.com"
+#   "This domain may be available. For information, contact us-domain@i-theta.com"
+#   "Domain foo.example.us may be available – contact registrar"
+_PARKING_TXT_RE: re.Pattern[str] = re.compile(r"may be available", re.IGNORECASE)
+
+
+def _is_parking_txt(value: str | None) -> bool:
+    """True when *value* matches the known parking/availability TXT pattern."""
+    return bool(value and _PARKING_TXT_RE.search(value))
+
+
+def _all_other_findings_are_parking_txt(findings: list) -> bool:  # list[DiscoveredRecord]
+    """True when every item in *findings* is a TXT record with a parking value.
+
+    Returns False for empty lists (no evidence present at all — a different
+    situation that the caller handles separately) and for any list that contains
+    a non-TXT record or a TXT record whose value does not match the parking
+    pattern.  Only all-parking-TXT-only candidates are caught by the backstop.
+    """
+    if not findings:
+        return False
+    return all(
+        item.record_type == RecordType.TXT and _is_parking_txt(item.value)
+        for item in findings
+    )
+
+
 SOA_AUTHORITY_NOTE = (
     "SOA discovered; zone exists even though requested record type may have no direct answer."
 )
@@ -2594,6 +2633,24 @@ def _test_candidates(
                 else:  # CLEAN
                     for item in other_findings:
                         item.attestation_status = attestation.status.value
+                    # WC-FIX.1 §2B — parking-TXT backstop (defense in depth).
+                    # Even when wildcard detection returned CLEAN, a candidate
+                    # whose only evidence is a known parking/availability TXT
+                    # must not promote to CONFIRMED_ORDINARY_DNS_NAME.  This
+                    # catches the residual case where detection was correct but
+                    # the TXT is still a registrar parking string with no real
+                    # locality significance.
+                    if _all_other_findings_are_parking_txt(other_findings):
+                        result.evidence_outcomes.append(
+                            outcome_withheld_parking_txt_backstop(
+                                candidate,
+                                parent=parent_key,
+                                attestation_status_value=attestation.status.value,
+                                source_method="generated_candidate",
+                            )
+                        )
+                        other_findings = []
+                        wildcard_gate_applied = True
 
             findings_added = 0
             for item in other_findings:
