@@ -109,6 +109,11 @@ WILDCARD_WORDING_SUPPRESSED = (
 WILDCARD_WORDING_INCONCLUSIVE = (
     "Wildcard attestation inconclusive at parent scope; promotion withheld."
 )
+BRANCH_BREAKER_WORDING = (
+    "Stopped testing this branch after 20 consecutive priority-ordered misses "
+    "with zero findings. This is a heuristic performance cutoff, not proof "
+    "that no deeper names exist."
+)
 
 EVIDENCE_VALUE_ORDER = {
     "strong": 0,
@@ -1857,6 +1862,8 @@ def _evidence_outcome_row(
         outcome_notes = f"{WILDCARD_WORDING_SUPPRESSED} {notes}".strip()
     elif diag_reason == "wildcard_attestation_inconclusive":
         outcome_notes = f"{WILDCARD_WORDING_INCONCLUSIVE} {notes}".strip()
+    elif outcome.evidence_status == EvidenceStatus.SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC:
+        outcome_notes = f"{BRANCH_BREAKER_WORDING} {notes}".strip()
     else:
         outcome_notes = notes
     return {

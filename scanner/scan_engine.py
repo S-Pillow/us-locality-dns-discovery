@@ -30,6 +30,7 @@ from scanner.evidence_status import (
     outcome_ignored_unrelated_authority,
     outcome_inconclusive_dns_failure,
     outcome_nodata_parent_authority,
+    outcome_skipped_by_branch_timeout_heuristic,
     outcome_suppressed_wildcard_match,
     outcome_withheld_wildcard_inconclusive,
     resolve_evidence_status,
@@ -176,6 +177,10 @@ SOA_AUTHORITY_NOTE = (
 SOA_MNAME_INDICATOR_NOTE = "authoritative indicator from SOA"
 
 # option field -> (log display name, wordlist filename)
+# WL-TRIM Change 3: delegated_manager_clues removed from candidate generation.
+# The NS-signature / delegation-classifier behaviour in delegation_verifier.py
+# is unchanged.  The ScanOptions.include_delegated_manager_clues field is kept
+# for backward compatibility but produces no candidates from this table.
 WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("include_light_evidence", "Light Evidence labels", "light_evidence.txt"),
     ("include_rfc_locality_baseline", "RFC/locality baseline", "rfc1480.txt"),
@@ -183,7 +188,6 @@ WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("include_civic_departments", "Civic departments", "civic_departments.txt"),
     ("include_public_services", "Public services / portals", "public_services.txt"),
     ("include_schools_libraries", "Schools / libraries", "schools_libraries.txt"),
-    ("include_delegated_manager_clues", "Delegated-manager clues", "delegated_manager_clues.txt"),
 )
 
 FIFTH_LEVEL_KNOWN_PREFIXES = (
@@ -199,15 +203,25 @@ FIFTH_LEVEL_KNOWN_PREFIXES = (
     "admin",
 )
 
+# WL-TRIM Change 1: 5th-level prefixes come from the Civic departments pool only.
+# RFC/locality labels (rfc1480.txt) are branch labels; they belong at the 4th
+# level, not as 5th-level leaf guesses.  Common DNS/web labels (dns_common.txt)
+# are service-host guesses and are mostly noise as delegated 5th-level targets.
+# Public services and schools/libraries similarly belong at 4th level.
+# 4th-level generation is unchanged — NORMAL still uses all three Normal sources.
 FIFTH_LEVEL_PREFIX_SOURCES = (
-    "include_dns_common",
     "include_civic_departments",
-    "include_public_services",
-    "include_schools_libraries",
 )
 
 WILDCARD_ATTESTATION_PROBE_COUNT = 3  # ≥3 required by §2
 CANDIDATE_CANCEL_CHECK_INTERVAL = 5
+
+# WL-TRIM Change 4: branch timeout circuit breaker threshold.
+# After this many consecutive priority-ordered Civic 5th-level misses under a
+# validated RFC branch, stop testing the remaining Civic candidates for that
+# branch.  Remaining names are classified SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC
+# (heuristic skip only — not proof of absence).
+BRANCH_BREAKER_N: int = 20
 PARTIAL_SCAN_MESSAGE = (
     "This scan was cancelled before all domains were completed. Results are partial."
 )
@@ -2164,6 +2178,7 @@ def _test_candidates(
     parent_ns_cache: dict[str, list[str]] | None = None,
     ns_ip_cache: dict[str, list[str]] | None = None,
     unreachable_ns_ips: set[str] | None = None,
+    known_input_parents: set[str] | None = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     _ = parent_failed  # legacy verify scripts; decisions cache replaces this set
@@ -2176,6 +2191,14 @@ def _test_candidates(
     parent_skip_counts: dict[str, int] = {}
     if not candidates:
         return tested
+
+    # WL-TRIM Change 4: branch timeout circuit breaker state.
+    # Tracks per-branch consecutive miss counts and tripped branches.
+    # Only applied to broad 5th-level candidates under validated RFC branches
+    # that are NOT in known_input_parents (Lane 1 / known-input bypass §AC14).
+    branch_miss_counters: dict[str, int] = {}
+    branch_tripped: set[str] = set()
+    skipped_by_breaker = 0
 
     # 29A Change 1: cached NS-IP resolver — memoises _resolve_nameserver_ips
     # per run so the same NS host is never re-queried across candidates.
@@ -2259,6 +2282,28 @@ def _test_candidates(
                                 outcome_from_parent_gating_skip(candidate, cached)
                             )
                             continue
+
+            # --- WL-TRIM Change 4: branch timeout circuit breaker ---
+            # Applies to broad 5th-level candidates under validated RFC branches
+            # only.  Known-input parents (Lane 1 / explicit user candidates) are
+            # exempt so that registry-known validation is never skipped (§AC14).
+            if validate_fifth_level_parents and parent_passed is not None:
+                _parent = _implied_fourth_level_parent(candidate, domain)
+                if _parent is not None:
+                    _pk = _display_name(_parent)
+                    _is_broad_rfc_branch = (
+                        _pk in parent_passed
+                        and _is_rfc_branch_parent(_pk, domain)
+                        and (known_input_parents is None or _pk not in known_input_parents)
+                    )
+                    if _is_broad_rfc_branch and _pk in branch_tripped:
+                        result.evidence_outcomes.append(
+                            outcome_skipped_by_branch_timeout_heuristic(
+                                candidate, branch=_pk, breaker_n=BRANCH_BREAKER_N
+                            )
+                        )
+                        skipped_by_breaker += 1
+                        continue
 
             # --- Ticket 29: parallel record sweep (async dispatch/gather) ---
             # All 6 CANDIDATE_RECORD_TYPES queries are fired concurrently via
@@ -2449,6 +2494,38 @@ def _test_candidates(
 
             tested = candidate_index
 
+            # --- WL-TRIM Change 4: update branch miss counter ---
+            # Only tracked for broad RFC-branch 5th-level candidates (not
+            # known-input parents).  Real findings (not wildcard echoes, not
+            # errors) reset the counter to zero; all other outcomes increment.
+            if validate_fifth_level_parents and parent_passed is not None:
+                _bc_parent = _implied_fourth_level_parent(candidate, domain)
+                if _bc_parent is not None:
+                    _bc_pk = _display_name(_bc_parent)
+                    _is_broad_rfc = (
+                        _bc_pk in parent_passed
+                        and _is_rfc_branch_parent(_bc_pk, domain)
+                        and (known_input_parents is None or _bc_pk not in known_input_parents)
+                        and _bc_pk not in branch_tripped
+                    )
+                    if _is_broad_rfc:
+                        if findings_added > 0:
+                            branch_miss_counters[_bc_pk] = 0
+                        else:
+                            branch_miss_counters[_bc_pk] = (
+                                branch_miss_counters.get(_bc_pk, 0) + 1
+                            )
+                            if branch_miss_counters[_bc_pk] >= BRANCH_BREAKER_N:
+                                branch_tripped.add(_bc_pk)
+                                _emit(
+                                    f"  Branch breaker fired for {_bc_pk}: "
+                                    f"{BRANCH_BREAKER_N} consecutive misses with zero findings. "
+                                    f"Remaining Civic candidates for this branch are skipped. "
+                                    f"Heuristic cutoff only — not proof of absence.",
+                                    progress,
+                                    messages,
+                                )
+
             candidate_errors_combined = ns_candidate_errors + candidate_errors
             if candidate_errors_combined:
                 result.evidence_outcomes.append(
@@ -2486,8 +2563,14 @@ def _test_candidates(
             messages,
         )
     skipped_note = f", {skipped_fifth} skipped (parent not validated)" if skipped_fifth else ""
+    breaker_note = (
+        f", {skipped_by_breaker} skipped by branch timeout heuristic"
+        f" ({len(branch_tripped)} branch(es) tripped)"
+        if skipped_by_breaker
+        else ""
+    )
     _emit(
-        f"  {phase.value}: {tested} tested{skipped_note}, "
+        f"  {phase.value}: {tested} tested{skipped_note}{breaker_note}, "
         f"{subdelegation_count} delegated child zone(s), "
         f"{candidate_record_count} DNS name(s) with records",
         progress,
@@ -3029,6 +3112,7 @@ def scan_domain(
             parent_ns_cache=parent_ns_cache,
             ns_ip_cache=ns_ip_cache,
             unreachable_ns_ips=unreachable_ns_ips,
+            known_input_parents=known_input_parents,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested

@@ -206,29 +206,41 @@ def test_ac1_all_7_branches_in_normal_candidates():
 
 
 def test_ac1b_known_real_world_candidate_shapes():
-    """AC-1b: confirm specific candidate shapes that the old code could not produce."""
+    """AC-1b: confirm specific candidate shapes that the old code could not produce.
+
+    WL-TRIM Change 1: 5th-level prefix pool is now Civic departments only.
+    RFC/locality and Common DNS/web labels are no longer in the 5th-level pool.
+    All verified candidate shapes must come from civic_departments.txt.
+    """
     plan = _normal_plan()
     candidates = set(generate_broad_fifth_level_candidates(BASE_DOMAIN, plan))
 
-    # admin.pvt.indiana.pa.us — pvt branch was not in old FIFTH_LEVEL_BRANCHES
+    # admin.pvt.indiana.pa.us — Civic 'admin', pvt branch (was not in old ci/co set)
     assert "admin.pvt.indiana.pa.us" in candidates, (
-        "AC1b FAIL: admin.pvt.indiana.pa.us should be generated (pvt is new branch)"
+        "AC1b FAIL: admin.pvt.indiana.pa.us should be generated (Civic admin + pvt branch)"
     )
-    # portal.tec.indiana.pa.us — tec branch was not in old FIFTH_LEVEL_BRANCHES
-    assert "portal.tec.indiana.pa.us" in candidates, (
-        "AC1b FAIL: portal.tec.indiana.pa.us should be generated (tec is new branch)"
+    # police.tec.indiana.pa.us — Civic 'police', tec branch (was not in old ci/co set)
+    assert "police.tec.indiana.pa.us" in candidates, (
+        "AC1b FAIL: police.tec.indiana.pa.us should be generated (Civic police + tec branch)"
     )
-    # www.k12.indiana.pa.us — k12 branch was not in old FIFTH_LEVEL_BRANCHES
-    assert "www.k12.indiana.pa.us" in candidates, (
-        "AC1b FAIL: www.k12.indiana.pa.us should be generated (k12 is new branch)"
+    # fire.k12.indiana.pa.us — Civic 'fire', k12 branch (was not in old ci/co set)
+    assert "fire.k12.indiana.pa.us" in candidates, (
+        "AC1b FAIL: fire.k12.indiana.pa.us should be generated (Civic fire + k12 branch)"
     )
-    # admin.ci.indiana.pa.us — ci was in old set, must still be present
+    # admin.ci.indiana.pa.us — Civic 'admin', ci branch (was in old set; must still be present)
     assert "admin.ci.indiana.pa.us" in candidates, (
-        "AC1b FAIL: admin.ci.indiana.pa.us must still be generated (ci was in old set)"
+        "AC1b FAIL: admin.ci.indiana.pa.us must still be generated"
     )
-    # admin.co.indiana.pa.us — co was in old set, must still be present
-    assert "admin.co.indiana.pa.us" in candidates, (
-        "AC1b FAIL: admin.co.indiana.pa.us must still be generated (co was in old set)"
+    # clerk.co.indiana.pa.us — Civic 'clerk', co branch (was in old set; must still be present)
+    assert "clerk.co.indiana.pa.us" in candidates, (
+        "AC1b FAIL: clerk.co.indiana.pa.us must still be generated"
+    )
+    # WL-TRIM: portal and www are no longer 5th-level prefixes (dns_common removed)
+    assert "portal.tec.indiana.pa.us" not in candidates, (
+        "AC1b FAIL: portal.tec.indiana.pa.us must NOT be generated (dns_common excluded from 5th)"
+    )
+    assert "www.k12.indiana.pa.us" not in candidates, (
+        "AC1b FAIL: www.k12.indiana.pa.us must NOT be generated (dns_common excluded from 5th)"
     )
 
 
@@ -237,7 +249,12 @@ def test_ac1b_known_real_world_candidate_shapes():
 # ---------------------------------------------------------------------------
 
 def test_ac2_candidate_count_math():
-    """AC-2: NORMAL broad-5th count = fifth_level_prefix_count × 7 branches."""
+    """AC-2: NORMAL broad-5th count = fifth_level_prefix_count × 7 branches.
+
+    WL-TRIM Change 1: 5th-level prefix pool is now Civic departments only (90 labels).
+    Previously it included dns_common + civic + public_services + schools_libraries = 138.
+    New NORMAL broad-5th count = 90 × 7 = 630 (down from 966).
+    """
     plan = _normal_plan()
     assert plan.fifth_level_enabled, "AC2 FAIL: fifth_level_enabled must be True for NORMAL"
 
@@ -248,12 +265,13 @@ def test_ac2_candidate_count_math():
         f"({plan.fifth_level_prefix_count} prefixes × {len(FIFTH_LEVEL_BRANCHES)} branches), "
         f"got {len(actual)}"
     )
-    # Sanity: with 7 branches and 138 prefix labels we expect 966
-    assert plan.fifth_level_prefix_count == 138, (
-        f"AC2 FAIL: NORMAL prefix-label count should be 138, got {plan.fifth_level_prefix_count}"
+    # WL-TRIM: Civic-only pool = 90 prefix labels, broad-5th = 630
+    assert plan.fifth_level_prefix_count == 90, (
+        f"AC2 FAIL: NORMAL 5th-level prefix-label count should be 90 (Civic only), "
+        f"got {plan.fifth_level_prefix_count}"
     )
-    assert expected_broad == 966, (
-        f"AC2 FAIL: expected 966 broad-5th candidates (138×7), got {expected_broad}"
+    assert expected_broad == 630, (
+        f"AC2 FAIL: expected 630 broad-5th candidates (90×7), got {expected_broad}"
     )
 
 
@@ -278,16 +296,17 @@ def test_ac3_claim_to_code_branch_constant():
 #       pool are the same as pre-WL1a (no new label file was added).
 # ---------------------------------------------------------------------------
 
-def test_ac4_prefix_sources_unchanged():
-    """AC-4 (Rule 5): FIFTH_LEVEL_PREFIX_SOURCES must contain exactly the original 4 entries."""
-    expected = {
-        "include_dns_common",
-        "include_civic_departments",
-        "include_public_services",
-        "include_schools_libraries",
-    }
+def test_ac4_prefix_sources_civic_only():
+    """AC-4 (WL-TRIM Change 1): FIFTH_LEVEL_PREFIX_SOURCES must be Civic departments only.
+
+    WL-TRIM narrowed the 5th-level prefix pool from 4 sources (dns_common,
+    civic_departments, public_services, schools_libraries) to Civic departments only.
+    RFC/locality labels are branch labels (4th-level), not leaf guesses.
+    Common DNS/web labels are service-host guesses, mostly noise at 5th level.
+    """
+    expected = {"include_civic_departments"}
     assert set(FIFTH_LEVEL_PREFIX_SOURCES) == expected, (
-        f"AC4 FAIL: FIFTH_LEVEL_PREFIX_SOURCES changed. "
+        f"AC4 FAIL: FIFTH_LEVEL_PREFIX_SOURCES must be Civic-only after WL-TRIM. "
         f"Expected {expected}, got {set(FIFTH_LEVEL_PREFIX_SOURCES)}"
     )
 
@@ -298,7 +317,15 @@ def test_ac4_prefix_sources_unchanged():
 # ---------------------------------------------------------------------------
 
 def test_ac5_deep_all_on_count():
-    """AC-5: DEEP with all optional lists on produces correct candidate totals."""
+    """AC-5: DEEP with all optional lists on produces correct candidate totals.
+
+    WL-TRIM Changes 1 & 3:
+    - 5th-level prefix pool is now Civic departments only (90 labels) regardless
+      of which 4th-level sources are enabled.
+    - delegated_manager_clues removed from WORDLIST_SOURCES; passing
+      include_delegated_manager_clues=True no longer adds candidates.
+    - DEEP broad-5th = 90 × 7 = 630 (down from 194×7=1358).
+    """
     opts = ScanOptions(
         scan_profile=ScanProfile.DEEP,
         include_rfc_locality_baseline=True,
@@ -306,7 +333,7 @@ def test_ac5_deep_all_on_count():
         include_civic_departments=True,
         include_public_services=True,
         include_schools_libraries=True,
-        include_delegated_manager_clues=True,
+        include_delegated_manager_clues=True,  # no-op after WL-TRIM Change 3
     )
     plan = build_wordlist_plan(opts, WORDLISTS_DIR, known_fourth_level_count=1)
     assert plan.fifth_level_enabled, "AC5 FAIL: fifth_level_enabled should be True for DEEP+RFC"
@@ -315,11 +342,13 @@ def test_ac5_deep_all_on_count():
     assert len(broad) == expected_broad, (
         f"AC5 FAIL: expected {expected_broad} broad candidates, got {len(broad)}"
     )
-    assert plan.fifth_level_prefix_count == 194, (
-        f"AC5 FAIL: DEEP all-on prefix count should be 194, got {plan.fifth_level_prefix_count}"
+    # WL-TRIM: Civic-only 5th-level prefix pool = 90, broad-5th = 630
+    assert plan.fifth_level_prefix_count == 90, (
+        f"AC5 FAIL: DEEP 5th-level prefix count should be 90 (Civic only), "
+        f"got {plan.fifth_level_prefix_count}"
     )
-    assert expected_broad == 1358, (
-        f"AC5 FAIL: expected 1358 broad candidates (194×7), got {expected_broad}"
+    assert expected_broad == 630, (
+        f"AC5 FAIL: expected 630 broad candidates (90×7), got {expected_broad}"
     )
 
 

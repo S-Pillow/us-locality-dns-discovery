@@ -34,6 +34,8 @@ _DIAGNOSTIC_EVIDENCE_STATUSES = frozenset(
         # Wildcard attestation diagnostics (R4a)
         EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
         EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        # WL-TRIM Change 4: branch timeout circuit breaker
+        EvidenceStatus.SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC,
     }
 )
 
@@ -190,6 +192,28 @@ def outcome_candidate_tested(fqdn: str, *, source_method: str) -> EvidenceOutcom
         evidence_status=EvidenceStatus.CANDIDATE_TESTED,
         source_method=source_method,
         detail="Candidate tested; no confirmed DNS evidence",
+    )
+
+
+def outcome_skipped_by_branch_timeout_heuristic(
+    fqdn: str,
+    branch: str,
+    breaker_n: int,
+) -> EvidenceOutcome:
+    """WL-TRIM Change 4: branch timeout circuit breaker fired.
+
+    The candidate was NOT tested.  This is a heuristic performance cutoff only.
+    The absence of the name is NOT proven by this skip.
+    """
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC,
+        source_method="generated_candidate",
+        detail=(
+            f"Stopped testing this branch after {breaker_n} consecutive "
+            f"priority-ordered misses with zero findings. "
+            f"This is a heuristic performance cutoff, not proof that no deeper names exist."
+        ),
     )
 
 

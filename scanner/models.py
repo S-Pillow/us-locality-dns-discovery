@@ -188,6 +188,15 @@ class EvidenceStatus(str, Enum):
     """Candidate response matches the parent's wildcard signature; suppressed to diagnostic."""
     WITHHELD_WILDCARD_INCONCLUSIVE = "WITHHELD_WILDCARD_INCONCLUSIVE"
     """Wildcard attestation at parent was inconclusive; promotion withheld in Light mode."""
+    # WL-TRIM Change 4: branch timeout circuit breaker
+    SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC = "SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC"
+    """Fifth-level candidate skipped by the branch timeout circuit breaker (WL-TRIM).
+
+    The breaker fires after BRANCH_BREAKER_N consecutive priority-ordered Civic
+    misses with zero findings under a validated RFC branch.  This is a heuristic
+    performance cutoff only — the name was not tested and its absence is NOT proven.
+    Must never be applied to Lane 1 / known-input / registry-known validation.
+    """
 
 
 class RegistryDNSStatus(str, Enum):
