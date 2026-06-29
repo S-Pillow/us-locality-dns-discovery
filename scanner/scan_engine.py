@@ -57,6 +57,7 @@ from scanner.parent_gating import (
     decision_for_rfc_branch_sentinel_hit,
     decision_for_rfc_branch_sentinel_miss,
     decision_for_validated_parent,
+    decision_for_weak_parent_validation,
     outcome_from_parent_gating_skip,
     probe_parent_response_classes,
 )
@@ -826,6 +827,94 @@ def _name_has_usable_findings(fqdn: str, result: DomainScanResult) -> bool:
     return False
 
 
+_PARENT_GATING_SKIP_CLASSIFICATIONS = frozenset(
+    {
+        FindingClassification.QUERY_ERROR,
+        FindingClassification.SCAN_ERROR,
+        FindingClassification.AXFR_BLOCKED,
+        FindingClassification.NO_RECORDS_DISCOVERED,
+        FindingClassification.AUTHORITATIVE_NS,
+        FindingClassification.BASE_DOMAIN_RECORD,
+        FindingClassification.BASE_ZONE_EXISTS,
+    }
+)
+
+_STRONG_DELEGATION_CLASSIFICATIONS = frozenset(
+    {
+        FindingClassification.DELEGATED_CHILD_ZONE,
+        FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+        FindingClassification.ZONE_SOA_DISCOVERED,
+        FindingClassification.AXFR_SUCCESS,
+    }
+)
+
+
+def _is_strong_record_for_gating(
+    record: DiscoveredRecord,
+    base_attestation: "WildcardAttestation | None",
+) -> bool:
+    """Return True when *record* constitutes strong parent-validation evidence.
+
+    Used in ``_validate_fourth_level_parent`` (Tier 2 / lazy fresh probes) to
+    filter out TXT records and wildcard-pool A/AAAA echoes, neither of which
+    constitute strong validation for opening a full fifth-level sweep.
+
+    Decision table:
+    - NS / SOA / delegation / AXFR → always strong.
+    - TXT → always weak (TXT alone does not open a 5th-level sweep).
+    - A / AAAA in wildcard address pool → weak (wildcard echo).
+    - A / AAAA not in wildcard pool (or no wildcard detected) → strong.
+    - CNAME / MX → strong.
+    """
+    if record.classification in _STRONG_DELEGATION_CLASSIFICATIONS:
+        return True
+    if record.classification != FindingClassification.STANDARD_RECORD:
+        return False
+    if record.record_type == RecordType.TXT:
+        return False
+    if record.record_type in {RecordType.A, RecordType.AAAA}:
+        if (
+            base_attestation is not None
+            and base_attestation.status == WildcardAttestationStatus.DETECTED
+            and record.value in base_attestation.address_pool
+        ):
+            return False
+    return True
+
+
+def _name_has_strong_parent_findings(
+    fqdn: str,
+    result: DomainScanResult,
+) -> bool:
+    """True when scan records include strong non-TXT evidence for fqdn.
+
+    Like ``_name_has_usable_findings`` but excludes TXT-only records.
+    Used in parent-gating contexts to enforce the rule that TXT-only
+    fourth-level evidence does not open a full fifth-level sweep.
+
+    Records that reached ``result.records`` from a 4th-level sweep already
+    passed the wildcard gate (WC-FIX), so wildcard-pool A/AAAA echoes are
+    already absent.  The only remaining weak case is a parent whose only
+    distinct record type is TXT.
+
+    Delegation / SOA / AXFR are always strong.
+    A, AAAA, CNAME, MX at STANDARD_RECORD level → strong (wildcard-gated).
+    TXT at STANDARD_RECORD level → not strong.
+    """
+    for record in result.records:
+        if not _names_match(record.fqdn, fqdn):
+            continue
+        if record.classification in _PARENT_GATING_SKIP_CLASSIFICATIONS:
+            continue
+        if record.classification in _STRONG_DELEGATION_CLASSIFICATIONS:
+            return True
+        if record.classification == FindingClassification.STANDARD_RECORD:
+            if record.record_type == RecordType.TXT:
+                continue
+            return True
+    return False
+
+
 def _get_parent_ns_hosts(parent: str) -> list[str]:
     """Return NS hostnames for *parent* via recursive discovery."""
     hosts, _, _ = discover_authoritative_nameservers(parent)
@@ -842,9 +931,19 @@ def _validate_fourth_level_parent(
     progress: ProgressCallback | None,
     messages: list[str],
     unreachable_ns_ips: set[str] | None = None,
+    base_attestation: "WildcardAttestation | None" = None,
 ) -> ParentGatingDecision:
-    """Directly test an implied 4th-level parent; return a structured gating decision."""
+    """Directly test an implied 4th-level parent; return a structured gating decision.
+
+    ``base_attestation`` is the wildcard attestation for the base domain (the
+    enumeration parent of all 4th-level candidates).  When provided, A/AAAA
+    records that are in the wildcard address pool are excluded from the
+    strong-record count so that wildcard echoes do not open 5th-level sweeps.
+    TXT records are always excluded from the strong-record count regardless of
+    attestation status.
+    """
     added_records = 0
+    strong_records = 0
     probe_classes: list[DNSResponseClass] = []
     delegation = verify_delegated_child_zone(
         parent,
@@ -911,6 +1010,8 @@ def _validate_fourth_level_parent(
         )
         result.records.append(item)
         added_records += 1
+        if _is_strong_record_for_gating(item, base_attestation):
+            strong_records += 1
 
     for error in ns_errors + parent_errors:
         result.records.append(
@@ -924,8 +1025,24 @@ def _validate_fourth_level_parent(
             )
         )
 
-    if added_records > 0 or delegation.verified:
-        decision = decision_for_validated_parent(parent, record_count=added_records)
+    if strong_records > 0 or delegation.verified:
+        decision = decision_for_validated_parent(parent, record_count=strong_records)
+        _emit(f"    {decision.diagnostic_message}", progress, messages)
+        return decision
+
+    if added_records > 0:
+        # Records were returned by DNS but all are weak (TXT-only or wildcard-pool
+        # A/AAAA echoes).  Weak evidence does not open a full 5th-level sweep.
+        # Records are still in result.records for reporting; the branch is skipped.
+        weak_reason = (
+            "only wildcard-pool or TXT records found"
+            if (
+                base_attestation is not None
+                and base_attestation.status == WildcardAttestationStatus.DETECTED
+            )
+            else "TXT-only records found"
+        )
+        decision = decision_for_weak_parent_validation(parent, reason=weak_reason)
         _emit(f"    {decision.diagnostic_message}", progress, messages)
         return decision
 
@@ -1041,6 +1158,7 @@ def _run_rfc_branch_tiered_probe(
     progress: ProgressCallback | None,
     messages: list[str],
     unreachable_ns_ips: set[str] | None,
+    base_attestation: "WildcardAttestation | None" = None,
 ) -> ParentGatingDecision:
     """Tier 2/3/4 progressive probe for an unvalidated RFC branch apex (Ticket 30).
 
@@ -1052,6 +1170,9 @@ def _run_rfc_branch_tiered_probe(
 
     Tier 4 — escalation: sentinel hit → allow_descendants=True, full 5th-level
     testing proceeds.  Sentinel miss → heuristic-skip disclosure (not absence).
+
+    ``base_attestation`` is forwarded to Tier 2 to prevent wildcard-pool echoes
+    and TXT-only records from opening a full 5th-level sweep.
     """
     pk = _display_name(parent)
 
@@ -1065,6 +1186,7 @@ def _run_rfc_branch_tiered_probe(
         progress=progress,
         messages=messages,
         unreachable_ns_ips=unreachable_ns_ips,
+        base_attestation=base_attestation,
     )
     if apex_decision.allow_descendants:
         return apex_decision
@@ -2179,6 +2301,7 @@ def _test_candidates(
     ns_ip_cache: dict[str, list[str]] | None = None,
     unreachable_ns_ips: set[str] | None = None,
     known_input_parents: set[str] | None = None,
+    base_attestation: "WildcardAttestation | None" = None,
 ) -> int:
     """Test a list of candidate names; return count tested."""
     _ = parent_failed  # legacy verify scripts; decisions cache replaces this set
@@ -2255,7 +2378,7 @@ def _test_candidates(
                     if parent_key not in parent_passed:
                         cached = parent_decisions.get(parent_key)
                         if cached is None:
-                            if _name_has_usable_findings(parent, result):
+                            if _name_has_strong_parent_findings(parent, result):
                                 cached = decision_for_validated_parent(
                                     parent_key,
                                     record_count=0,
@@ -2270,6 +2393,7 @@ def _test_candidates(
                                     progress=progress,
                                     messages=messages,
                                     unreachable_ns_ips=unreachable_ns_ips,
+                                    base_attestation=base_attestation,
                                 )
                             parent_decisions[parent_key] = cached
                             if cached.allow_descendants:
@@ -2976,6 +3100,12 @@ def scan_domain(
         fifth_parents = _unique_fifth_level_parents(fifth_candidates, domain)
         fourth_tested_names = {_display_name(name) for name in fourth_candidates}
 
+        # PARENT-GATE-HARDEN: base-domain wildcard attestation used to exclude
+        # wildcard-pool A/AAAA echoes from the strong-record count.  Always
+        # available because it is computed before candidate testing starts
+        # (line ~2640) and stored as attestation_cache[domain].
+        gate_base_attestation = attestation_cache.get(_display_name(domain))
+
         known_input_parents = {
             _display_name(d)
             for d in (input_record.known_fourth_level_domains if input_record else [])
@@ -3003,12 +3133,14 @@ def scan_domain(
                         messages=messages,
                     )
             elif pk in fourth_tested_names:
-                if _name_has_usable_findings(p, result):
+                if _name_has_strong_parent_findings(p, result):
+                    # Strong non-TXT evidence exists from the 4th-level sweep
+                    # (records already wildcard-gated by WC-FIX).
                     parent_passed.add(pk)
                     parent_decisions[pk] = decision_for_validated_parent(pk, record_count=0)
                 elif _is_rfc_branch_parent(pk, domain):
                     # Ticket 30: RFC branch was tested in the 4th-level sweep but produced
-                    # no usable findings.  Fall through to the Tier 2-4 probing block below
+                    # no strong findings.  Fall through to the Tier 2-4 probing block below
                     # by NOT setting parent_decisions[pk] here.
                     pass
                 else:
@@ -3016,10 +3148,11 @@ def scan_domain(
             if pk not in parent_decisions and _is_rfc_branch_parent(pk, domain):
                 # Ticket 30 — Progressive RFC Branch Escalation (Tiers 2–5).
                 # Fires when an RFC branch apex either (a) was NOT tested in the 4th-level
-                # sweep at all, or (b) was tested but produced no usable findings (the
-                # elif above set parent_decisions[pk] only when findings exist).  Without
-                # this block, unfound RFC branches would reach the lazy _validate_fourth_level_parent
-                # path in _test_candidates with no disclosure when skipped.
+                # sweep at all, or (b) was tested but produced no strong findings (the
+                # elif above set parent_decisions[pk] only when strong findings exist).
+                # Without this block, unfound RFC branches would reach the lazy
+                # _validate_fourth_level_parent path in _test_candidates with no disclosure
+                # when skipped.
                 if resolved_options.deep_rfc_branch_sweep:
                     # Tier 5 (opt-in): open all RFC branches unconditionally.
                     parent_passed.add(pk)
@@ -3032,6 +3165,8 @@ def scan_domain(
                     )
                 else:
                     # Tiers 2–4: apex probe → sentinel probe → escalation or heuristic skip.
+                    # PARENT-GATE-HARDEN: pass base_attestation so Tier 2 can exclude
+                    # wildcard-pool A/AAAA echoes from the strong-record count.
                     decision = _run_rfc_branch_tiered_probe(
                         p,
                         domain,
@@ -3041,6 +3176,7 @@ def scan_domain(
                         progress=progress,
                         messages=messages,
                         unreachable_ns_ips=unreachable_ns_ips,
+                        base_attestation=gate_base_attestation,
                     )
                     parent_decisions[pk] = decision
                     if decision.allow_descendants:
@@ -3113,6 +3249,7 @@ def scan_domain(
             ns_ip_cache=ns_ip_cache,
             unreachable_ns_ips=unreachable_ns_ips,
             known_input_parents=known_input_parents,
+            base_attestation=gate_base_attestation,
         )
     result.fifth_level_candidates_tested = fifth_tested
     candidates_tested = fourth_tested + fifth_tested

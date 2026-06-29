@@ -74,6 +74,35 @@ def decision_for_fourth_level_tested_without_evidence(parent_name: str) -> Paren
     )
 
 
+def decision_for_weak_parent_validation(
+    parent_name: str,
+    *,
+    reason: str,
+) -> ParentGatingDecision:
+    """Parent has DNS records but only weak evidence (TXT-only or wildcard-pool echoes).
+
+    Weak evidence does not open a full fifth-level sweep.  The weak-record path
+    is triggered when a fresh apex probe returns records that are all TXT-only or
+    all wildcard-pool A/AAAA echoes — none of which constitute strong validation.
+
+    This is a performance and evidence-quality cutoff, not proof of absence.
+    """
+    return ParentGatingDecision(
+        allow_descendants=False,
+        parent_name=parent_name,
+        reason=f"Weak parent evidence: {reason}",
+        evidence_status=EvidenceStatus.SKIPPED_BY_PARENT_GATING,
+        response_class=None,
+        confidence=ParentGatingConfidence.HEURISTIC_SKIP,
+        diagnostic_message=(
+            f"Skipped fifth-level sweep because the fourth-level parent {parent_name} "
+            "was not strongly validated. "
+            "This is a performance and evidence-quality cutoff, "
+            "not proof that no deeper names exist."
+        ),
+    )
+
+
 def probe_parent_response_classes(
     parent: str,
     record_types: tuple[RecordType, ...],
