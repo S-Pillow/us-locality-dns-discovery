@@ -178,10 +178,6 @@ SOA_AUTHORITY_NOTE = (
 SOA_MNAME_INDICATOR_NOTE = "authoritative indicator from SOA"
 
 # option field -> (log display name, wordlist filename)
-# WL-TRIM Change 3: delegated_manager_clues removed from candidate generation.
-# The NS-signature / delegation-classifier behaviour in delegation_verifier.py
-# is unchanged.  The ScanOptions.include_delegated_manager_clues field is kept
-# for backward compatibility but produces no candidates from this table.
 WORDLIST_SOURCES: tuple[tuple[str, str, str], ...] = (
     ("include_light_evidence", "Light Evidence labels", "light_evidence.txt"),
     ("include_rfc_locality_baseline", "RFC/locality baseline", "rfc1480.txt"),
@@ -245,7 +241,6 @@ def apply_scan_profile(options: ScanOptions) -> ScanOptions:
             include_civic_departments=False,
             include_public_services=False,
             include_schools_libraries=False,
-            include_delegated_manager_clues=False,
             include_custom_wordlist=options.include_custom_wordlist,
             custom_wordlist_path=options.custom_wordlist_path,
             attempt_axfr=False,
@@ -260,7 +255,6 @@ def apply_scan_profile(options: ScanOptions) -> ScanOptions:
             include_civic_departments=True,
             include_public_services=False,
             include_schools_libraries=False,
-            include_delegated_manager_clues=False,
             include_custom_wordlist=options.include_custom_wordlist,
             custom_wordlist_path=options.custom_wordlist_path,
             attempt_axfr=options.attempt_axfr,
@@ -275,7 +269,6 @@ def apply_scan_profile(options: ScanOptions) -> ScanOptions:
         include_civic_departments=options.include_civic_departments,
         include_public_services=options.include_public_services,
         include_schools_libraries=options.include_schools_libraries,
-        include_delegated_manager_clues=options.include_delegated_manager_clues,
         include_custom_wordlist=options.include_custom_wordlist,
         custom_wordlist_path=options.custom_wordlist_path,
         attempt_axfr=options.attempt_axfr,

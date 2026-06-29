@@ -351,7 +351,6 @@ class ScanOptions:
     include_civic_departments: bool = True
     include_public_services: bool = False
     include_schools_libraries: bool = False
-    include_delegated_manager_clues: bool = False
     include_custom_wordlist: bool = False
     custom_wordlist_path: Optional[Path] = None
     attempt_axfr: bool = False

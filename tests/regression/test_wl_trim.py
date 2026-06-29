@@ -6,7 +6,7 @@ tests covering all four changes and the 14 evidence-discipline cases.
 Changes covered:
   Change 1   5th-level prefix pool = Civic departments only.
   Change 2   Civic 5th-level list is priority ordered (high-yield labels first).
-  Change 3   delegated_manager_clues no longer feeds generated candidates.
+  Change 3   delegated_manager_clues removed from candidate generation (fully cleaned in DELETE-DM-CLUES).
   Change 4   Branch timeout circuit breaker (N=20) per validated RFC branch.
 
 NA/AC index:
@@ -15,7 +15,7 @@ NA/AC index:
   NA-3   RFC/locality labels are NOT used as 5th-level leaf prefixes.
   NA-4   Common DNS/web labels are NOT used as 5th-level leaf prefixes.
   NA-5   delegated_manager_clues does not feed generated candidates.
-  NA-6   Delegated-manager NS-signature field in ScanOptions still exists.
+  NA-6   ScanOptions.include_delegated_manager_clues field is removed (DELETE-DM-CLUES).
   NA-7   Breaker fires at exactly 20 consecutive misses.
   NA-8   Breaker does NOT fire at 19 consecutive misses.
   NA-9   Breaker resets on a confirmed finding.
@@ -79,7 +79,6 @@ def _deep_all_on_plan(*, known_count: int = 0):
         include_civic_departments=True,
         include_public_services=True,
         include_schools_libraries=True,
-        include_delegated_manager_clues=True,  # no-op after Change 3
     )
     return build_wordlist_plan(opts, WORDLISTS_DIR, known_fourth_level_count=known_count)
 
@@ -227,57 +226,35 @@ def test_na5_manager_clues_not_in_wordlist_sources():
     )
 
 
-def test_na5b_manager_clues_true_produces_no_extra_candidates():
-    """NA-5b: passing include_delegated_manager_clues=True produces no additional candidates."""
-    opts_without = ScanOptions(
-        scan_profile=ScanProfile.DEEP,
-        include_rfc_locality_baseline=True,
-        include_dns_common=True,
-        include_civic_departments=True,
-    )
-    opts_with = ScanOptions(
-        scan_profile=ScanProfile.DEEP,
-        include_rfc_locality_baseline=True,
-        include_dns_common=True,
-        include_civic_departments=True,
-        include_delegated_manager_clues=True,
-    )
-    plan_without = build_wordlist_plan(opts_without, WORDLISTS_DIR)
-    plan_with = build_wordlist_plan(opts_with, WORDLISTS_DIR)
-    assert plan_without.total_unique_labels == plan_with.total_unique_labels, (
-        "NA5b FAIL: include_delegated_manager_clues=True must not change candidate count; "
-        f"without={plan_without.total_unique_labels}, with={plan_with.total_unique_labels}"
-    )
-    assert plan_without.fifth_level_prefix_count == plan_with.fifth_level_prefix_count, (
-        "NA5b FAIL: include_delegated_manager_clues=True must not change 5th-level prefix count"
-    )
-
-
-def test_na5c_manager_clue_labels_absent_from_fourth_level():
-    """NA-5c: labels from delegated_manager_clues.txt do not appear in DEEP all-on 4th-level pool."""
-    plan = _deep_all_on_plan()
-    label_set = set(plan.unique_labels)
-    clues_path = WORDLISTS_DIR / "delegated_manager_clues.txt"
-    clue_labels = [ln.strip() for ln in clues_path.read_text().splitlines() if ln.strip()]
-    for label in clue_labels:
-        assert label not in label_set, (
-            f"NA5c FAIL: delegated_manager_clue label {label!r} must not be in 4th-level pool"
-        )
-
-
-# ---------------------------------------------------------------------------
-# NA-6  ScanOptions.include_delegated_manager_clues field still exists
-#       (backward compat; NS-signature behavior is separate).
-# ---------------------------------------------------------------------------
-
-def test_na6_scan_options_has_manager_clues_field():
-    """NA-6 (Change 3): ScanOptions.include_delegated_manager_clues field must still exist."""
+def test_na5b_manager_clues_field_absent_from_scan_options():
+    """NA-5b (DELETE-DM-CLUES): ScanOptions must NOT have include_delegated_manager_clues."""
     opts = ScanOptions()
-    assert hasattr(opts, "include_delegated_manager_clues"), (
-        "NA6 FAIL: ScanOptions must keep include_delegated_manager_clues for backward compat"
+    assert not hasattr(opts, "include_delegated_manager_clues"), (
+        "NA5b FAIL: include_delegated_manager_clues must be removed from ScanOptions "
+        "(DELETE-DM-CLUES ticket)"
     )
-    assert opts.include_delegated_manager_clues is False, (
-        "NA6 FAIL: include_delegated_manager_clues default must remain False"
+
+
+def test_na5c_manager_clues_wordlist_file_deleted():
+    """NA-5c (DELETE-DM-CLUES): delegated_manager_clues.txt must not exist in the wordlists dir."""
+    clues_path = WORDLISTS_DIR / "delegated_manager_clues.txt"
+    assert not clues_path.exists(), (
+        "NA5c FAIL: delegated_manager_clues.txt must be deleted "
+        "(DELETE-DM-CLUES ticket)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# NA-6  ScanOptions.include_delegated_manager_clues field is removed
+#       (DELETE-DM-CLUES ticket fully removed the field).
+# ---------------------------------------------------------------------------
+
+def test_na6_scan_options_does_not_have_manager_clues_field():
+    """NA-6 (DELETE-DM-CLUES): ScanOptions.include_delegated_manager_clues must be gone."""
+    opts = ScanOptions()
+    assert not hasattr(opts, "include_delegated_manager_clues"), (
+        "NA6 FAIL: ScanOptions must NOT have include_delegated_manager_clues "
+        "(DELETE-DM-CLUES ticket removed it completely)"
     )
 
 
