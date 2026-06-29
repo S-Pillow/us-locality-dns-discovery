@@ -31,9 +31,10 @@ _DIAGNOSTIC_EVIDENCE_STATUSES = frozenset(
         EvidenceStatus.SKIPPED_BY_PARENT_GATING,
         EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
         EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
-        # Wildcard attestation diagnostics (R4a)
+        # Wildcard attestation diagnostics (R4a / WC-FIX.1)
         EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
         EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        EvidenceStatus.WITHHELD_PARKING_ECHO,
         # WL-TRIM Change 4: branch timeout circuit breaker
         EvidenceStatus.SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC,
     }
@@ -271,7 +272,7 @@ def outcome_withheld_parking_txt_backstop(
     """
     return EvidenceOutcome(
         fqdn=fqdn,
-        evidence_status=EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        evidence_status=EvidenceStatus.WITHHELD_PARKING_ECHO,
         source_method=source_method,
         detail=(
             f"Parking/availability TXT backstop at parent {parent}: "

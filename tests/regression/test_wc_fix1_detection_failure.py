@@ -519,7 +519,9 @@ def test_ac_b_clean_probe_parking_txt_backstop() -> None:
         attestation_status_value=att.status.value,
         source_method="generated_candidate",
     )
-    assert backstop_outcome.evidence_status == EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE
+    assert backstop_outcome.evidence_status == EvidenceStatus.WITHHELD_PARKING_ECHO, (
+        f"AC (b') FAIL: parking backstop must use WITHHELD_PARKING_ECHO; got {backstop_outcome.evidence_status}"
+    )
     assert not is_confirmed_evidence_status(backstop_outcome.evidence_status), (
         "AC (b') FAIL: parking backstop outcome must NOT be confirmed"
     )
