@@ -106,18 +106,46 @@ class WildcardAttestation:
 # ---------------------------------------------------------------------------
 
 
+def _txt_rdata_value(rdata) -> str:
+    """Decode a TXT rdata object to the same form used by scan_engine._format_rdata.
+
+    dnspython's ``rdata.to_text()`` wraps each string component in double-quotes
+    (DNS master-file form), e.g. ``"hello world"``.  scan_engine._format_rdata joins
+    the decoded bytes components without quotes, e.g. ``hello world``.  Both paths
+    must produce the same normalised string so that the wildcard membership check
+    ``candidate_value not in type_signatures["TXT"]`` is a true like-for-like
+    comparison.
+
+    This function is the single source of truth for TXT normalisation inside the
+    attestation engine.  It mirrors _format_rdata's TXT branch exactly.
+    """
+    return " ".join(
+        part.decode() if isinstance(part, bytes) else str(part)
+        for part in rdata.strings
+    )
+
+
 def _answer_values(response: dns.message.Message, rr_type_str: str) -> frozenset[str]:
     """Extract normalised rdata text values from the answer section, TTL excluded.
 
     Only the answer section is inspected.  A parent-zone authority SOA appearing
     in the authority section of an NXDOMAIN response is deliberately ignored — §4.
+
+    TXT records are normalised via ``_txt_rdata_value`` (decoded, unquoted) to match
+    the form produced by scan_engine._format_rdata.  All other types use
+    ``rdata.to_text()``.  This alignment is required so that the wildcard membership
+    check in candidate_differentiates() compares like-for-like — without it, every
+    TXT candidate would appear distinct and be falsely promoted (WC-RCA defect 1).
     """
     rtype = dns.rdatatype.from_text(rr_type_str)
     values: set[str] = set()
     for rrset in response.answer:
         if rrset.rdtype == rtype:
             for rdata in rrset:
-                values.add(rdata.to_text())
+                if rr_type_str == "TXT":
+                    values.add(_txt_rdata_value(rdata))
+                else:
+                    values.add(rdata.to_text())
     return frozenset(values)
 
 
