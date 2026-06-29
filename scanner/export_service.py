@@ -2620,6 +2620,15 @@ def build_settings_rows(result: ScanRunResult) -> list[tuple[str, str]]:
         ("operator_note", OPERATOR_NOTE),
         ("review_path_note", REVIEW_PATH_NOTE),
     ]
+    # WC-FIX2: Lane 1 status row so the technical reader can see whether the
+    # registry cross-check ran, ran but found nothing, or was never triggered.
+    lane1_state, lane1_n = _lane1_status(result)
+    _LANE1_STATUS_LABELS = {
+        "inactive": "inactive — registry_known_names column absent from input",
+        "active_empty": "active — column present, 0 registry-known names matched",
+        "active": f"active — {lane1_n} registry-known name{'s' if lane1_n != 1 else ''} processed",
+    }
+    rows.append(("lane1_registry_check_status", _LANE1_STATUS_LABELS[lane1_state]))
     return rows
 
 
@@ -2688,6 +2697,32 @@ def build_errors_warning_rows(result: ScanRunResult) -> list[dict[str, str]]:
                 "message": (
                     f"Warning: estimated {plan.estimated_candidates_per_domain} candidates per domain "
                     "may increase scan time and noise."
+                ),
+                "notes": DISCOVERY_LIMITATION,
+            }
+        )
+
+    # WC-FIX2: Lane 1 inactive notice for the technical reader.
+    lane1_state_ew, _ = _lane1_status(result)
+    if lane1_state_ew == "inactive":
+        rows.append(
+            {
+                "scan_timestamp": scan_timestamp,
+                "base_domain": "",
+                "delegated_manager": "",
+                "zone": "",
+                "warning_type": "lane1_inactive",
+                "tested_name": "",
+                "record_type": "",
+                "nameserver": "",
+                "message": (
+                    "Lane 1 / Registry Matrix did not run: no registry_known_names "
+                    "column in the input file. The registry cross-check requires a "
+                    "registry_known_names column listing the registry-supplied subdomain "
+                    "names for each base domain. "
+                    "If the input has known_fourth_level_domains / "
+                    "known_fifth_level_domains columns, those are the portal/system "
+                    "view and are not interchangeable with registry_known_names."
                 ),
                 "notes": DISCOVERY_LIMITATION,
             }
@@ -3095,6 +3130,42 @@ def _fqdn_is_known(fqdn: str, domain_result: DomainScanResult) -> bool:
     return normalize_domain_name(fqdn) in known
 
 
+def _lane1_status(result: ScanRunResult) -> tuple[str, int]:
+    """Return (status, n_names) describing Lane 1 activity for this run.
+
+    WC-FIX2 claim-to-code: this is the single source of truth for the three-state
+    Lane 1 transparency check.  Called by build_plain_english_summary_rows,
+    build_settings_rows, and build_errors_warning_rows.
+
+    Returns
+    -------
+    status : str
+        ``'inactive'``     – ``registry_known_names`` column absent from input file.
+        ``'active_empty'`` – column present, but 0 names loaded/matched across all domains.
+        ``'active'``       – column present, n_names > 0 names processed.
+    n_names : int
+        Total registry-known names across all domain registry matrices (0 when inactive
+        or active_empty).
+    """
+    load_info = result.input_load_info
+    col_present = load_info is not None and (
+        "registry_known_names" in (load_info.metadata_columns_detected or [])
+    )
+    # Fall back to scanning domain_inputs when load_info is unavailable.
+    if not col_present and any(
+        di.registry_known_names for di in result.domain_inputs
+    ):
+        col_present = True
+
+    n_names = sum(len(dr.registry_matrix) for dr in result.domain_results)
+
+    if not col_present:
+        return "inactive", 0
+    if n_names == 0:
+        return "active_empty", 0
+    return "active", n_names
+
+
 def build_plain_english_summary_rows(result: ScanRunResult) -> list[tuple[str, str]]:
     """Build the plain-English Tab 1 for non-technical readers.
 
@@ -3178,6 +3249,37 @@ def build_plain_english_summary_rows(result: ScanRunResult) -> list[tuple[str, s
 
     # -- count line --
     rows.append(("At a glance", count_line))
+
+    # -- WC-FIX2: Lane 1 registry cross-check status --
+    lane1_state, lane1_n = _lane1_status(result)
+    if lane1_state == "inactive":
+        rows.append((
+            "Registry cross-check — not run",
+            "This scan's input file did not include a registry_known_names column, "
+            "so the tool could not compare against a registry-supplied list of known "
+            "subdomains. That check was not run — its absence from this report does "
+            "not mean the registry has no relevant names, only that none were supplied "
+            "for comparison. "
+            "To enable this check, add a registry_known_names column to the input CSV "
+            "with the registry-supplied subdomain names for each base domain. "
+            "Note: if the input has a known_fourth_level_domains or "
+            "known_fifth_level_domains column, those record the portal/system view and "
+            "are not the same input this check requires.",
+        ))
+    elif lane1_state == "active_empty":
+        rows.append((
+            "Registry cross-check — active, no matches",
+            "The registry_known_names column was present in the input, but no "
+            "registry-known subdomains were loaded or matched for any domain in "
+            "this scan. The registry cross-check ran but produced no matrix rows.",
+        ))
+    else:
+        rows.append((
+            "Registry cross-check — active",
+            f"The registry_known_names column was present. {lane1_n} "
+            f"registry-known name{'s' if lane1_n != 1 else ''} "
+            "were processed and appear in the Registry Matrix sheet.",
+        ))
 
     # -- one card per strong finding --
     if t1_items:
