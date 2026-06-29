@@ -31,9 +31,10 @@ _DIAGNOSTIC_EVIDENCE_STATUSES = frozenset(
         EvidenceStatus.SKIPPED_BY_PARENT_GATING,
         EvidenceStatus.INCONCLUSIVE_DNS_FAILURE,
         EvidenceStatus.IGNORED_UNRELATED_AUTHORITY,
-        # Wildcard attestation diagnostics (R4a)
+        # Wildcard attestation diagnostics (R4a / WC-FIX.1)
         EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
         EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        EvidenceStatus.WITHHELD_PARKING_ECHO,
         # WL-TRIM Change 4: branch timeout circuit breaker
         EvidenceStatus.SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC,
     }
@@ -249,5 +250,35 @@ def outcome_withheld_wildcard_inconclusive(
         evidence_status=EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
         source_method=source_method,
         detail=f"Wildcard attestation inconclusive at parent {parent}; promotion withheld",
+        attestation_status=WildcardAttestationStatus.INCONCLUSIVE.value,
+    )
+
+
+def outcome_withheld_parking_echo(
+    fqdn: str,
+    *,
+    parent: str,
+    source_method: str = "generated_candidate",
+    txt_value: str = "",
+) -> EvidenceOutcome:
+    """Candidate TXT is a known parking string — withheld from confirmed findings (WC-FIX.1 2B).
+
+    This outcome fires when wildcard detection was INCONCLUSIVE or CLEAN but the
+    TXT record value matches a known domain-parking / availability pattern.  It is
+    defense-in-depth: wildcard detection is not the only gate between a parking
+    echo and a confirmed finding.
+    """
+    from scanner.wildcard_attestation import WildcardAttestationStatus  # noqa: PLC0415
+
+    detail = (
+        f"Candidate TXT at parent {parent} matches a known domain-parking pattern"
+        + (f": {txt_value!r}" if txt_value else "")
+        + "; withheld from confirmed findings (parking echo, not a real subdomain record)"
+    )
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.WITHHELD_PARKING_ECHO,
+        source_method=source_method,
+        detail=detail,
         attestation_status=WildcardAttestationStatus.INCONCLUSIVE.value,
     )

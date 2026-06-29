@@ -73,6 +73,39 @@ ATTESTATION_PROBE_TYPES: tuple[str, ...] = (
 
 MIN_PROBE_COUNT: int = 3
 
+# Known domain-parking / domain-availability TXT patterns (WC-FIX.1 2B).
+# A candidate TXT value that contains any of these substrings (case-insensitive)
+# is treated as a parking echo and withheld from confirmed findings even when
+# wildcard detection returns CLEAN (defense-in-depth backstop).
+#
+# Criteria for inclusion:
+#   • Confirmed in operator evidence as appearing in wildcard TXT at .ks.us domains.
+#   • Clearly a registrar/parking-infrastructure contact, not legitimate DNS content.
+#   • Absence of this string in any real subdomain record is documented or obvious.
+#
+# Do NOT add patterns that could match legitimate MX targets, SPF mechanisms,
+# DKIM selectors, DMARC tags, or other real-use TXT record content.
+PARKING_TXT_PATTERNS: tuple[str, ...] = (
+    "i-theta.com",   # buddyns / i-theta domain-parking registrar contact (confirmed)
+    "buddyns.com",   # buddyns nameserver-hosting platform
+)
+
+
+def is_parking_txt(txt_value: str) -> bool:
+    """Return True when *txt_value* matches a known domain-parking / availability pattern.
+
+    Used as a defense-in-depth backstop (WC-FIX.1 2B) to classify TXT records
+    whose content is a known parking registrar signature as non-confirmed even
+    when wildcard detection was CLEAN or INCONCLUSIVE.
+
+    Only tests for known-safe parking strings (see ``PARKING_TXT_PATTERNS``).
+    Does NOT suppress arbitrary TXT content — legitimate TXT records such as
+    SPF, DKIM, DMARC, or ACME challenge tokens are not matched.
+    """
+    lower = txt_value.lower()
+    return any(pattern in lower for pattern in PARKING_TXT_PATTERNS)
+
+
 # Named differentiation reasons (§5, §7 forward-compat).
 REASON_DISTINCT_RRTYPE = "distinct_rrtype"
 REASON_DISTINCT_ANSWER = "distinct_answer"
@@ -95,6 +128,10 @@ class WildcardAttestation:
     parent: str
     probes_attempted: int = 0
     probes_with_answers: int = 0
+    # Count of probe labels where at least one query had a transport/rcode error.
+    # Used by operators and tests to distinguish INCONCLUSIVE-from-errors from
+    # INCONCLUSIVE-from-too-few-responses (WC-FIX.1 2A).
+    probes_with_errors: int = 0
     # Per-RRtype frozensets of normalised rdata text (TTL excluded) — §4 signature.
     type_signatures: dict[str, frozenset[str]] = field(default_factory=dict)
     # Union of all A + AAAA values seen across probes — §6 pool containment.
@@ -215,12 +252,18 @@ def run_wildcard_attestation(
     probe_labels = [_entropy_label() for _ in range(probe_count)]
     type_value_sets: dict[str, set[str]] = {}
     probes_with_answers = 0
-    usable_labels = 0  # labels where ≥1 type query returned a usable response
+    probes_with_errors = 0
+    # WC-FIX.1 2A: only count error-free labels toward the CLEAN threshold.
+    # A label where some queries returned NXDOMAIN but others timed out is
+    # NOT a clean negative — we didn't check all types successfully.
+    # Labels that had any error are counted in probes_with_errors instead.
+    clean_usable_labels = 0  # labels where ≥1 usable response AND zero errors
 
     for label in probe_labels:
         probe_fqdn = f"{label}.{parent}"
         label_had_usable_response = False
         label_had_answer = False
+        label_had_error = False  # WC-FIX.1 2A: any query for this label failed
 
         for rr_type_str in ATTESTATION_PROBE_TYPES:
             try:
@@ -230,11 +273,13 @@ def run_wildcard_attestation(
 
             response, error = send_dns_query_fn(probe_fqdn, rr_type, resolver)
             if error is not None or response is None:
-                # Network/transport error — non-usable for CLEAN counting.
+                # Network/transport error — non-usable; mark label as having an error.
+                label_had_error = True
                 continue
 
             # SERVFAIL / REFUSED / malformed rcode → non-usable (1b).
             if not _response_is_usable(response):
+                label_had_error = True
                 continue
 
             # At least one query for this label returned a usable DNS response.
@@ -250,10 +295,14 @@ def run_wildcard_attestation(
             if values:
                 type_value_sets.setdefault(rr_type_str, set()).update(values)
 
-        if label_had_usable_response:
-            usable_labels += 1
+        # WC-FIX.1 2A: only count toward CLEAN if the label had NO errors at all.
+        # A label with mixed NXDOMAIN + timeout is NOT a clean negative.
+        if label_had_usable_response and not label_had_error:
+            clean_usable_labels += 1
         if label_had_answer:
             probes_with_answers += 1
+        if label_had_error:
+            probes_with_errors += 1
 
     type_signatures = {t: frozenset(v) for t, v in type_value_sets.items() if v}
 
@@ -266,26 +315,32 @@ def run_wildcard_attestation(
             parent=parent,
             probes_attempted=probe_count,
             probes_with_answers=probes_with_answers,
+            probes_with_errors=probes_with_errors,
             type_signatures=type_signatures,
             address_pool=address_pool,
         )
 
-    if usable_labels >= probe_count:
-        # All requested probes returned usable DNS responses with no answers → clean.
+    if clean_usable_labels >= probe_count:
+        # All requested probes were error-free and returned no wildcard answers → CLEAN.
+        # WC-FIX.1 2A: requires zero errors per label, not merely ≥1 usable response.
         return WildcardAttestation(
             status=WildcardAttestationStatus.CLEAN,
             parent=parent,
             probes_attempted=probe_count,
             probes_with_answers=probes_with_answers,
+            probes_with_errors=probes_with_errors,
         )
 
-    # Fewer usable labels than probe_count — SERVFAIL/REFUSED/errors prevented
-    # enough valid probes to conclude CLEAN.
+    # Fewer error-free usable labels than probe_count.
+    # Could be SERVFAIL/REFUSED/network errors (existing 1b) OR per-type timeouts
+    # that left some queries unchecked (WC-FIX.1 2A new path).
+    # Either way: cannot conclude CLEAN.
     return WildcardAttestation(
         status=WildcardAttestationStatus.INCONCLUSIVE,
         parent=parent,
         probes_attempted=probe_count,
         probes_with_answers=probes_with_answers,
+        probes_with_errors=probes_with_errors,
     )
 
 

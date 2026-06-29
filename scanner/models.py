@@ -188,6 +188,15 @@ class EvidenceStatus(str, Enum):
     """Candidate response matches the parent's wildcard signature; suppressed to diagnostic."""
     WITHHELD_WILDCARD_INCONCLUSIVE = "WITHHELD_WILDCARD_INCONCLUSIVE"
     """Wildcard attestation at parent was inconclusive; promotion withheld in Light mode."""
+    WITHHELD_PARKING_ECHO = "WITHHELD_PARKING_ECHO"
+    """Candidate TXT matches a known domain-parking / availability pattern.
+
+    Withheld from confirmed findings as a likely wildcard/parking echo.
+    Applied as a defense-in-depth backstop (WC-FIX.1 2B) when wildcard detection
+    was INCONCLUSIVE or CLEAN but the TXT content is a recognised parking string
+    (e.g. registrar contact at i-theta.com / buddyns.com).
+    Not proof the name doesn't exist; proof the TXT value is not a real subdomain record.
+    """
     # WL-TRIM Change 4: branch timeout circuit breaker
     SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC = "SKIPPED_BY_BRANCH_TIMEOUT_HEURISTIC"
     """Fifth-level candidate skipped by the branch timeout circuit breaker (WL-TRIM).

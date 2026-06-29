@@ -32,6 +32,7 @@ from scanner.evidence_status import (
     outcome_nodata_parent_authority,
     outcome_skipped_by_branch_timeout_heuristic,
     outcome_suppressed_wildcard_match,
+    outcome_withheld_parking_echo,
     outcome_withheld_wildcard_inconclusive,
     resolve_evidence_status,
     stamp_record_evidence_status,
@@ -40,6 +41,7 @@ from scanner.wildcard_attestation import (
     WildcardAttestation,
     WildcardAttestationStatus,
     candidate_differentiates,
+    is_parking_txt,
     run_wildcard_attestation,
 )
 from scanner.evidence_trace import (
@@ -742,6 +744,26 @@ def _has_delegation_signal(findings: list[DiscoveredRecord]) -> bool:
     Gate condition: ``FindingClassification.ZONE_SOA_DISCOVERED`` in findings.
     """
     return any(f.classification == FindingClassification.ZONE_SOA_DISCOVERED for f in findings)
+
+
+def _parking_echo_txt(findings: list) -> str | None:
+    """Return the first parking-pattern TXT value in *findings*, or None.
+
+    Used by the WC-FIX.1 2B defense-in-depth backstop.  A candidate whose only
+    distinguishable content is a known parking-registrar TXT string is withheld
+    even when wildcard detection was CLEAN or INCONCLUSIVE.
+
+    Only fires when the TXT value matches ``PARKING_TXT_PATTERNS``; all other
+    record types and non-parking TXT values are ignored.  This prevents
+    over-suppression of legitimate A/AAAA/NS/SOA or real TXT records.
+    """
+    from scanner.models import RecordType  # noqa: PLC0415
+
+    for record in findings:
+        if record.record_type == RecordType.TXT and record.value:
+            if is_parking_txt(record.value):
+                return record.value
+    return None
 
 
 def _suppression_match_detail(
@@ -2580,20 +2602,53 @@ def _test_candidates(
                             item.wildcard_differentiation_reason = differentiation_reason
                 elif attestation.status == WildcardAttestationStatus.INCONCLUSIVE:
                     # Withhold: Light default; Deep-mode override is deferred (§3).
-                    result.evidence_outcomes.append(
-                        outcome_withheld_wildcard_inconclusive(
-                            candidate,
-                            parent=parent_key,
-                            source_method="generated_candidate",
+                    # WC-FIX.1 2B: if the candidate TXT is a known parking pattern,
+                    # use the more specific WITHHELD_PARKING_ECHO outcome so operators
+                    # can distinguish a parking echo from a genuinely uncertain result.
+                    parking_txt = _parking_echo_txt(other_findings)
+                    if parking_txt is not None:
+                        result.evidence_outcomes.append(
+                            outcome_withheld_parking_echo(
+                                candidate,
+                                parent=parent_key,
+                                source_method="generated_candidate",
+                                txt_value=parking_txt,
+                            )
                         )
-                    )
+                    else:
+                        result.evidence_outcomes.append(
+                            outcome_withheld_wildcard_inconclusive(
+                                candidate,
+                                parent=parent_key,
+                                source_method="generated_candidate",
+                            )
+                        )
                     for item in other_findings:
                         item.attestation_status = attestation.status.value
                     other_findings = []
                     wildcard_gate_applied = True
                 else:  # CLEAN
-                    for item in other_findings:
-                        item.attestation_status = attestation.status.value
+                    # WC-FIX.1 2B defense-in-depth: even under a CLEAN attestation,
+                    # a TXT that matches a known parking pattern should not promote.
+                    # This guards against cache-warm detection falsely returning CLEAN
+                    # on a domain whose wildcard is TXT-only.
+                    parking_txt = _parking_echo_txt(other_findings)
+                    if parking_txt is not None:
+                        result.evidence_outcomes.append(
+                            outcome_withheld_parking_echo(
+                                candidate,
+                                parent=parent_key,
+                                source_method="generated_candidate",
+                                txt_value=parking_txt,
+                            )
+                        )
+                        for item in other_findings:
+                            item.attestation_status = attestation.status.value
+                        other_findings = []
+                        wildcard_gate_applied = True
+                    else:
+                        for item in other_findings:
+                            item.attestation_status = attestation.status.value
 
             findings_added = 0
             for item in other_findings:
