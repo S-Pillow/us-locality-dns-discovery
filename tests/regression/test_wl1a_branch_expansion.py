@@ -319,11 +319,10 @@ def test_ac4_prefix_sources_civic_only():
 def test_ac5_deep_all_on_count():
     """AC-5: DEEP with all optional lists on produces correct candidate totals.
 
-    WL-TRIM Changes 1 & 3:
+    WL-TRIM Changes 1 & 3 / DELETE-DM-CLUES:
     - 5th-level prefix pool is now Civic departments only (90 labels) regardless
       of which 4th-level sources are enabled.
-    - delegated_manager_clues removed from WORDLIST_SOURCES; passing
-      include_delegated_manager_clues=True no longer adds candidates.
+    - delegated_manager_clues fully removed (field and file deleted).
     - DEEP broad-5th = 90 × 7 = 630 (down from 194×7=1358).
     """
     opts = ScanOptions(
@@ -333,7 +332,6 @@ def test_ac5_deep_all_on_count():
         include_civic_departments=True,
         include_public_services=True,
         include_schools_libraries=True,
-        include_delegated_manager_clues=True,  # no-op after WL-TRIM Change 3
     )
     plan = build_wordlist_plan(opts, WORDLISTS_DIR, known_fourth_level_count=1)
     assert plan.fifth_level_enabled, "AC5 FAIL: fifth_level_enabled should be True for DEEP+RFC"

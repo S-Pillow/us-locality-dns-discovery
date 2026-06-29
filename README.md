@@ -156,7 +156,6 @@ Built-in wordlists are editable one-label-per-line text files under `wordlists/`
 | `civic_departments.txt` | Civic departments | **On** (Normal / Deep) |
 | `public_services.txt` | Public services / portals | Off |
 | `schools_libraries.txt` | Schools / libraries | Off |
-| `delegated_manager_clues.txt` | Delegated-manager clues | Off |
 
 **Custom wordlist:** browse for a `.txt` or `.csv` file, then use **Include custom wordlist** to control whether it is merged into the scan. The scan log always shows which sources were included.
 
@@ -176,7 +175,7 @@ Selected wordlists are **not complete** — they are starting points for discove
 - **RFC/locality baseline** — start here for Normal/Deep; enables 5th-level generation under all 7 RFC branches.
 - **Common DNS/web labels** — adds typical hostnames (`www`, `mail`, `ns1`, etc.); good for normal batches.
 - **Civic departments** — department-style labels; use for normal evidence scans.
-- **Public services / Schools / Delegated-manager clues** — broader label sets; reserve for deep scans on small domain counts.
+- **Public services / Schools** — broader label sets; reserve for deep scans on small domain counts.
 - **Custom wordlist** — browse for a `.txt` or `.csv` file, then check **Include custom wordlist**.
 
 Turn off sources you do not need to reduce scan time and noise.
@@ -189,7 +188,7 @@ Plan smaller batches for deeper wordlist coverage. For a full locality list (~15
 |------------|---------|----------------------------|
 | **Light scan** | 25–50 | Light Evidence labels only |
 | **Normal evidence scan** | 3–10 | RFC/locality baseline + Common DNS/web labels + Civic departments |
-| **Deep scan** | 1–3 | Add Public services, Schools/libraries, Delegated-manager clues, and/or a custom wordlist |
+| **Deep scan** | 1–3 | Add Public services, Schools/libraries, and/or a custom wordlist |
 
 Higher candidate counts mean longer run times. The preflight summary shows estimated candidates per domain and a scan-size label (`small`, `moderate`, `large`, `very large`) with operator guidance. Confirm before starting when totals reach 10,000+ or 50,000+ candidates.
 
@@ -528,8 +527,7 @@ us_locality_dns_discovery/
 │   ├── dns_common.txt
 │   ├── civic_departments.txt
 │   ├── public_services.txt
-│   ├── schools_libraries.txt
-│   └── delegated_manager_clues.txt
+│   └── schools_libraries.txt
 ├── output/
 ├── tests/
 │   └── regression/

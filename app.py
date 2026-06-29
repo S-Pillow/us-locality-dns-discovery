@@ -59,7 +59,6 @@ class DiscoveryApp(tk.Tk):
         self.civic_departments_var = tk.BooleanVar(value=True)
         self.public_services_var = tk.BooleanVar(value=False)
         self.schools_libraries_var = tk.BooleanVar(value=False)
-        self.delegated_manager_var = tk.BooleanVar(value=False)
         self.include_custom_var = tk.BooleanVar(value=False)
 
         self.axfr_var = tk.BooleanVar(value=False)
@@ -141,7 +140,6 @@ class DiscoveryApp(tk.Tk):
             ("Civic departments", self.civic_departments_var),
             ("Public services / portals", self.public_services_var),
             ("Schools / libraries", self.schools_libraries_var),
-            ("Delegated-manager clues", self.delegated_manager_var),
         ]
         self.wordlist_checkbuttons: list[ttk.Checkbutton] = []
         for index, (text, variable) in enumerate(wordlist_rows):
@@ -388,14 +386,12 @@ class DiscoveryApp(tk.Tk):
             self.civic_departments_var.set(False)
             self.public_services_var.set(False)
             self.schools_libraries_var.set(False)
-            self.delegated_manager_var.set(False)
         elif profile == ScanProfile.NORMAL:
             self.rfc_locality_var.set(True)
             self.dns_common_var.set(True)
             self.civic_departments_var.set(True)
             self.public_services_var.set(False)
             self.schools_libraries_var.set(False)
-            self.delegated_manager_var.set(False)
         self._refresh_preflight()
 
     def _bind_preflight_refresh(self) -> None:
@@ -406,7 +402,6 @@ class DiscoveryApp(tk.Tk):
             self.civic_departments_var,
             self.public_services_var,
             self.schools_libraries_var,
-            self.delegated_manager_var,
             self.include_custom_var,
             self.axfr_var,
             self.auth_ns_var,
@@ -747,7 +742,6 @@ class DiscoveryApp(tk.Tk):
             include_civic_departments=self.civic_departments_var.get(),
             include_public_services=self.public_services_var.get(),
             include_schools_libraries=self.schools_libraries_var.get(),
-            include_delegated_manager_clues=self.delegated_manager_var.get(),
             include_custom_wordlist=include_custom,
             custom_wordlist_path=wordlist_path if include_custom else None,
             attempt_axfr=self.axfr_var.get(),
@@ -764,7 +758,6 @@ class DiscoveryApp(tk.Tk):
         self._log(f"  Light Evidence labels: {resolved.include_light_evidence}")
         self._log(f"  Public services / portals: {resolved.include_public_services}")
         self._log(f"  Schools / libraries: {resolved.include_schools_libraries}")
-        self._log(f"  Delegated-manager clues: {resolved.include_delegated_manager_clues}")
         if options.custom_wordlist_path and options.include_custom_wordlist:
             self._log(f"  Custom wordlist included: {options.custom_wordlist_path}")
         elif options.custom_wordlist_path:
