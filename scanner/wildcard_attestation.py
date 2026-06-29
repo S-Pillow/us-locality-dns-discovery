@@ -29,6 +29,28 @@ Contract references:
   candidates to promote; INCONCLUSIVE would withhold all.  The current
   behaviour is therefore less restrictive but never silently promotes a matched
   candidate.
+
+WC-FIX.1 — detection non-determinism fix (§3, 1d):
+  Ticket WC-FIX.1 identified a non-determinism bug: when a wildcard is
+  TXT-only, non-TXT probe queries (A, AAAA, MX, …) return NXDOMAIN quickly
+  (marking each label "usable"), but the TXT query — the only type that would
+  reveal the wildcard — can time out or error under cold-cache / slow-resolver
+  conditions.  The label is still counted usable (the fast NXDOMAINs satisfy
+  the criterion), yet no wildcard signature is captured.  Result: CLEAN instead
+  of INCONCLUSIVE — the suppression gate never arms, and wildcard echoes reach
+  CONFIRMED_ORDINARY_DNS_NAME.
+
+  Fix: a label where any probe type errored or timed out is tracked as an
+  "error label".  CLEAN is returned ONLY when the error-label count is zero —
+  i.e., every probe type across every label returned a usable DNS response.
+  When error labels exist but no wildcard signature was captured the status is
+  INCONCLUSIVE, which the engine already withholds.
+
+  This does NOT make detection deterministic — cold-cache TXT queries can still
+  time out.  It makes the non-determinism HARMLESS: instead of silently
+  returning CLEAN and promoting echoes, the engine returns INCONCLUSIVE and
+  withholds.  The failure mode now fails toward suppression rather than toward
+  false confirmation.
 """
 
 from __future__ import annotations
@@ -95,6 +117,10 @@ class WildcardAttestation:
     parent: str
     probes_attempted: int = 0
     probes_with_answers: int = 0
+    # WC-FIX.1 §3 1d: count of probe labels that had at least one query error
+    # or timeout alongside usable responses from other types.  Non-zero means
+    # the CLEAN conclusion was demoted to INCONCLUSIVE.
+    labels_with_errors: int = 0
     # Per-RRtype frozensets of normalised rdata text (TTL excluded) — §4 signature.
     type_signatures: dict[str, frozenset[str]] = field(default_factory=dict)
     # Union of all A + AAAA values seen across probes — §6 pool containment.
@@ -215,12 +241,14 @@ def run_wildcard_attestation(
     probe_labels = [_entropy_label() for _ in range(probe_count)]
     type_value_sets: dict[str, set[str]] = {}
     probes_with_answers = 0
-    usable_labels = 0  # labels where ≥1 type query returned a usable response
+    usable_labels = 0   # labels where ≥1 type query returned a usable response
+    labels_with_errors = 0  # WC-FIX.1 §3 1d: labels that had ≥1 error alongside usable types
 
     for label in probe_labels:
         probe_fqdn = f"{label}.{parent}"
         label_had_usable_response = False
         label_had_answer = False
+        label_had_error = False  # WC-FIX.1: any type errored/timed-out for this label
 
         for rr_type_str in ATTESTATION_PROBE_TYPES:
             try:
@@ -231,10 +259,14 @@ def run_wildcard_attestation(
             response, error = send_dns_query_fn(probe_fqdn, rr_type, resolver)
             if error is not None or response is None:
                 # Network/transport error — non-usable for CLEAN counting.
+                # WC-FIX.1: also mark this label as having an error so the CLEAN
+                # criterion can distinguish "probed cleanly" from "some probes failed".
+                label_had_error = True
                 continue
 
             # SERVFAIL / REFUSED / malformed rcode → non-usable (1b).
             if not _response_is_usable(response):
+                label_had_error = True
                 continue
 
             # At least one query for this label returned a usable DNS response.
@@ -254,6 +286,8 @@ def run_wildcard_attestation(
             usable_labels += 1
         if label_had_answer:
             probes_with_answers += 1
+        if label_had_error:
+            labels_with_errors += 1  # WC-FIX.1
 
     type_signatures = {t: frozenset(v) for t, v in type_value_sets.items() if v}
 
@@ -266,26 +300,34 @@ def run_wildcard_attestation(
             parent=parent,
             probes_attempted=probe_count,
             probes_with_answers=probes_with_answers,
+            labels_with_errors=labels_with_errors,
             type_signatures=type_signatures,
             address_pool=address_pool,
         )
 
-    if usable_labels >= probe_count:
-        # All requested probes returned usable DNS responses with no answers → clean.
+    # WC-FIX.1 §3 1d: CLEAN requires that every probe label was error-free.
+    # If any label had an error (timeout / SERVFAIL / network failure) alongside
+    # a usable NXDOMAIN on another type, we cannot conclude "no wildcard" —
+    # the errored type might be the only one carrying a wildcard (e.g. TXT-only
+    # wildcards).  Treat as INCONCLUSIVE so promotion is withheld rather than
+    # silently allowed.  See module docstring for the full rationale.
+    if usable_labels >= probe_count and labels_with_errors == 0:
         return WildcardAttestation(
             status=WildcardAttestationStatus.CLEAN,
             parent=parent,
             probes_attempted=probe_count,
             probes_with_answers=probes_with_answers,
+            labels_with_errors=0,
         )
 
-    # Fewer usable labels than probe_count — SERVFAIL/REFUSED/errors prevented
-    # enough valid probes to conclude CLEAN.
+    # Fewer usable labels than probe_count, OR usable_labels sufficient but some
+    # labels had errors — SERVFAIL/REFUSED/timeouts prevented a clean conclusion.
     return WildcardAttestation(
         status=WildcardAttestationStatus.INCONCLUSIVE,
         parent=parent,
         probes_attempted=probe_count,
         probes_with_answers=probes_with_answers,
+        labels_with_errors=labels_with_errors,
     )
 
 

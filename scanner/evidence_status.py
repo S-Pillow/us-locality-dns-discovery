@@ -251,3 +251,32 @@ def outcome_withheld_wildcard_inconclusive(
         detail=f"Wildcard attestation inconclusive at parent {parent}; promotion withheld",
         attestation_status=WildcardAttestationStatus.INCONCLUSIVE.value,
     )
+
+
+def outcome_withheld_parking_txt_backstop(
+    fqdn: str,
+    *,
+    parent: str,
+    attestation_status_value: str,
+    source_method: str = "generated_candidate",
+) -> EvidenceOutcome:
+    """WC-FIX.1 §2B: parking-TXT backstop — candidate withheld regardless of attestation.
+
+    Applied when the only evidence for a candidate is a TXT record whose value
+    matches the known parking/availability pattern (e.g. "may be available …
+    contact …@i-theta.com").  Wildcard detection is no longer the single gate
+    between a parking-echo and a confirmed finding; this backstop catches the
+    case independently of whether detection returned DETECTED, CLEAN, or
+    INCONCLUSIVE.
+    """
+    return EvidenceOutcome(
+        fqdn=fqdn,
+        evidence_status=EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+        source_method=source_method,
+        detail=(
+            f"Parking/availability TXT backstop at parent {parent}: "
+            "all evidence matches a known registrar parking string; "
+            "promotion withheld regardless of wildcard detection status"
+        ),
+        attestation_status=attestation_status_value,
+    )
