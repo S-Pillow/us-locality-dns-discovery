@@ -3139,6 +3139,7 @@ def build_plain_english_summary_rows(result: ScanRunResult) -> list[tuple[str, s
             if outcome.evidence_status in {
                 EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
                 EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+                EvidenceStatus.WITHHELD_PARKING_ECHO,
             }:
                 dismissed_count += 1
 
