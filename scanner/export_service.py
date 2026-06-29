@@ -462,6 +462,7 @@ SUMMARY_HEADER_LABELS = {
 SUMMARY_SHEET_COLUMNS = _sheet_columns(SUMMARY_COLUMNS, SUMMARY_HEADER_LABELS)
 
 FINDINGS_XLSX_COLUMN_KEYS = [
+    "tier",
     "discovered_name",
     "known_domain",
     "name_type",
@@ -493,6 +494,7 @@ FINDINGS_XLSX_COLUMN_KEYS = [
 ]
 
 FINDINGS_HEADER_LABELS = {
+    "tier": "Tier",
     "scan_timestamp": "Scan timestamp",
     "base_domain": "Base domain",
     "discovered_name": "Discovered name",
@@ -1504,6 +1506,63 @@ def _map_confidence(value: str) -> str:
     return mapping.get(value, "unknown")
 
 
+# EXPORT-REDESIGN — finding tier system.
+# Tier is a PRESENTATION ranking derived solely from existing evidence classes.
+# It does not invent confidence or assert the thesis.  Wildcards/parking rows
+# that survived WC-FIX suppression would also land at T4; after WC-FIX.1 they
+# are absent from the confirmed-findings sheet entirely.
+#
+#   T1 — Delegated zone (strongest):  NS/SOA delegation, off-registry authority.
+#   T2 — Ordinary DNS name, strong/moderate evidence.
+#   T3 — Base/known validation or limited ordinary.
+#   T4 — Weak, diagnostic, or low-confidence (parking echoes, withheld rows).
+
+_TIER_LABELS: dict[int, str] = {
+    1: "T1 – Delegated zone",
+    2: "T2 – Ordinary record",
+    3: "T3 – Known / base",
+    4: "T4 – Weak / diagnostic",
+}
+
+_CONFIRMED_DELEGATION_STATUSES = frozenset({
+    EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE.value,
+    EvidenceStatus.CONFIRMED_DELEGATED_CHILD_ZONE_RECURSIVE.value,
+})
+
+_KNOWN_DOMAIN_STATUSES = frozenset({
+    EvidenceStatus.KNOWN_DOMAIN_VALIDATED.value,
+})
+
+
+def _finding_tier(evidence_status: str, evidence_value: str) -> int:
+    """Return display tier 1–4 for a finding row.
+
+    Claim-to-code (EXPORT-REDESIGN): this function is the sole source of truth
+    for tier assignment.  Called for every row in build_confirmed_findings_rows
+    and referenced by the sort in export_xlsx_report.
+
+    Args:
+        evidence_status: resolved EvidenceStatus string value.
+        evidence_value:  'strong' | 'moderate' | 'limited' | 'validation_only'
+                         | 'context_only' | 'none' | 'inconclusive' | ''.
+    """
+    if evidence_status in _CONFIRMED_DELEGATION_STATUSES:
+        return 1
+    if evidence_status in _KNOWN_DOMAIN_STATUSES:
+        return 3
+    if evidence_status == EvidenceStatus.CONFIRMED_ORDINARY_DNS_NAME.value:
+        if evidence_value in ("strong", "moderate"):
+            return 2
+        return 3
+    # Everything else: diagnostic, withheld, error, etc.
+    return 4
+
+
+def _tier_label(tier: int) -> str:
+    """Human-readable label for a tier integer."""
+    return _TIER_LABELS.get(tier, f"T{tier}")
+
+
 def _verification_method_for(record: DiscoveredRecord) -> str:
     """Return a stable verification_method string for delegation findings."""
     if record.classification == FindingClassification.DELEGATED_CHILD_ZONE:
@@ -1917,7 +1976,18 @@ def _record_error(record: DiscoveredRecord) -> str:
     return ""
 
 
-def _finding_notes(record: DiscoveredRecord, base_notes: str) -> str:
+_NO_WEB_PRESENCE_NOTE = (
+    "No website on this name — that is normal and expected for a delegated zone. "
+    "The servers shown run the zone itself, not a public website."
+)
+
+
+def _finding_notes(
+    record: DiscoveredRecord,
+    base_notes: str,
+    *,
+    has_web_presence: bool = True,
+) -> str:
     if record.source_method == "fifth_level_parent_validation":
         note = f"{FIFTH_LEVEL_PARENT_NOTE} {base_notes}".strip()
     elif record.classification in {
@@ -1929,6 +1999,14 @@ def _finding_notes(record: DiscoveredRecord, base_notes: str) -> str:
         note = f"{SCAN_ERROR_NOTE} {base_notes}".strip()
     else:
         note = base_notes
+    # EXPORT-REDESIGN: surface "no website" as a POSITIVE evidence note for
+    # delegated zones rather than leaving the cell blank/absent.  Missing A
+    # records on delegation names is the normal, expected state.
+    if (
+        record.classification == FindingClassification.DELEGATED_CHILD_ZONE
+        and not has_web_presence
+    ):
+        note = f"{_NO_WEB_PRESENCE_NOTE} {note}".strip()
     # §9 wildcard attestation wording: prepend contract phrasing when a wildcard
     # was detected but the candidate differentiated and was promoted (R4b).
     if record.attestation_status == "detected":
@@ -2235,14 +2313,18 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
                 comparison,
                 scan_failed=_domain_has_scan_error(domain_result),
             )
+            ev_val = str(comparison.get("evidence_value", "none"))
             rows.append(
                 {
+                    "tier": _tier_label(
+                        _finding_tier(EvidenceStatus.NOT_RECORDED.value, ev_val)
+                    ),
                     "scan_timestamp": scan_timestamp,
                     "base_domain": domain_result.domain,
                     "discovered_name": domain_result.domain,
                     "known_domain": "yes",
                     "name_type": "base_domain",
-                    "evidence_value": str(comparison.get("evidence_value", "none")),
+                    "evidence_value": ev_val,
                     "why": domain_why,
                     "tested_name": domain_result.domain,
                     "record_type": "",
@@ -2277,8 +2359,16 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
                 comparison,
                 record=record,
             )
+            ev_val = child_meta.get("evidence_value", "")
+            tier = _finding_tier(status.value, ev_val)
+            # EXPORT-REDESIGN: "no website" is a positive evidence note for delegated zones.
+            has_web = any(
+                r.fqdn == record.fqdn and r.record_type == RecordType.A
+                for r in domain_result.records
+            )
             rows.append(
                 {
+                    "tier": _tier_label(tier),
                     "scan_timestamp": scan_timestamp,
                     "base_domain": domain_result.domain,
                     **child_meta,
@@ -2295,13 +2385,15 @@ def build_confirmed_findings_rows(result: ScanRunResult) -> list[dict[str, str]]
                     "axfr_status": axfr_status,
                     "error": _record_error(record),
                     "wordlist_sources": wordlist_sources,
-                    "notes": _finding_notes(record, notes),
+                    "notes": _finding_notes(record, notes, has_web_presence=has_web),
                     **_wildcard_finding_fields(record),  # §7 (R4b)
                     # D2 provenance
                     "verification_method": _verification_method_for(record),
                 }
             )
 
+    # EXPORT-REDESIGN: sort by tier (strong first, weak last).
+    rows.sort(key=lambda r: r.get("tier", "T4"))
     return rows
 
 
@@ -2980,60 +3072,299 @@ def build_registry_matrix_rows(result: ScanRunResult) -> list[dict[str, str]]:
     return rows
 
 
+def _delegation_ns_values(fqdn: str, domain_result: DomainScanResult) -> list[str]:
+    """Return unique, sorted NS target names for a delegated child zone."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for r in domain_result.records:
+        if r.fqdn == fqdn and r.record_type == RecordType.NS and r.value:
+            ns = r.value.rstrip(".")
+            if ns not in seen:
+                seen.add(ns)
+                result.append(ns)
+    return sorted(result)
+
+
+def _fqdn_has_a_record(fqdn: str, domain_result: DomainScanResult) -> bool:
+    return any(r.fqdn == fqdn and r.record_type == RecordType.A for r in domain_result.records)
+
+
+def _fqdn_is_known(fqdn: str, domain_result: DomainScanResult) -> bool:
+    """True when *fqdn* appears in the domain's known-child input list."""
+    known = _known_names_for_domain(domain_result)
+    return normalize_domain_name(fqdn) in known
+
+
+def build_plain_english_summary_rows(result: ScanRunResult) -> list[tuple[str, str]]:
+    """Build the plain-English Tab 1 for non-technical readers.
+
+    EXPORT-REDESIGN (§A):
+    Design test — can someone who does not know what SOA, nameserver, or
+    delegation means read this tab cold and explain the finding to their
+    non-technical boss?  No enum names, no untranslated jargon.
+
+    Claim-to-code: this function produces the first tab; strong findings come
+    from CONFIRMED_DELEGATED_CHILD_ZONE records; counts from evidence_outcomes.
+    """
+    # ------------------------------------------------------------------ collect
+    t1_seen: set[str] = set()
+    t1_items: list[dict] = []
+    t2_count = 0
+    dismissed_count = 0   # wildcard echoes / parking strings suppressed
+
+    for domain_result in result.domain_results:
+        for record in domain_result.records:
+            if record.classification in {
+                FindingClassification.DELEGATED_CHILD_ZONE,
+                FindingClassification.DELEGATED_CHILD_ZONE_RECURSIVE,
+            }:
+                if record.fqdn not in t1_seen:
+                    t1_seen.add(record.fqdn)
+                    ns_servers = _delegation_ns_values(record.fqdn, domain_result)
+                    t1_items.append({
+                        "fqdn": record.fqdn,
+                        "ns_servers": ns_servers,
+                        "has_website": _fqdn_has_a_record(record.fqdn, domain_result),
+                        "known": _fqdn_is_known(record.fqdn, domain_result),
+                    })
+            else:
+                status = resolve_evidence_status(record, domain_result.domain)
+                ev_val = ""
+                if is_confirmed_evidence_status(status):
+                    tier = _finding_tier(status.value, ev_val)
+                    if tier == 2:
+                        t2_count += 1
+
+        for outcome in domain_result.evidence_outcomes:
+            if outcome.evidence_status in {
+                EvidenceStatus.SUPPRESSED_WILDCARD_MATCH,
+                EvidenceStatus.WITHHELD_WILDCARD_INCONCLUSIVE,
+            }:
+                dismissed_count += 1
+
+    # ------------------------------------------------------------------ compose
+    n_strong = len(t1_items)
+
+    # count summary line
+    count_parts = []
+    if n_strong:
+        count_parts.append(
+            f"{n_strong} strong finding{'s' if n_strong != 1 else ''} "
+            "(managed zones run by outside providers)"
+        )
+    if t2_count:
+        count_parts.append(
+            f"{t2_count} ordinary DNS record{'s' if t2_count != 1 else ''}"
+        )
+    if dismissed_count:
+        count_parts.append(
+            f"{dismissed_count} automated placeholder "
+            f"response{'s' if dismissed_count != 1 else ''} "
+            "set aside — not real findings"
+        )
+    count_line = " · ".join(count_parts) if count_parts else "No new findings detected."
+
+    rows: list[tuple[str, str]] = []
+
+    # -- What this scan checked --
+    rows.append((
+        "What this scan checked",
+        "This tool checks whether locality domains have activity in the live internet "
+        "directory (DNS) that isn't reflected in the registry's own records. When a "
+        "name is active in DNS but isn't on the supplied known-domain list, that's "
+        "what we're looking for.",
+    ))
+
+    # -- count line --
+    rows.append(("At a glance", count_line))
+
+    # -- one card per strong finding --
+    if t1_items:
+        rows.append((
+            "Strong findings — own managed zones",
+            "Each name below is set up and running as its own managed zone in the "
+            "live internet directory, pointed at servers run by an outside provider. "
+            "None appeared on the known-domain list supplied for this scan.",
+        ))
+        for item in t1_items:
+            fqdn = item["fqdn"]
+            ns_list = item["ns_servers"]
+            has_web = item["has_website"]
+            ns_text = (
+                f"Servers running it: {', '.join(ns_list)}."
+                if ns_list else
+                "Servers running it: not recorded in this scan."
+            )
+            web_text = (
+                ""
+                if has_web else
+                " It has no website, which is normal for this kind of setup."
+            )
+            known_text = (
+                " (This name was already on the supplied known-domain list.)"
+                if item["known"] else
+                " It was not on the supplied known-domain list."
+            )
+            rows.append((
+                fqdn,
+                f"Set up and running as its own managed zone in DNS, pointed at "
+                f"servers run by an outside provider — not the registry's servers. "
+                f"{ns_text}{web_text}{known_text}",
+            ))
+    else:
+        rows.append((
+            "Strong findings",
+            "No delegated zones (own managed zones run by outside providers) were "
+            "found in this scan.",
+        ))
+
+    if dismissed_count:
+        rows.append((
+            "Automated placeholder responses set aside",
+            f"{dismissed_count} response{'s' if dismissed_count != 1 else ''} matched "
+            "a registrar-provisioned placeholder message (an automated 'this domain "
+            "may be available' string). These are not real findings and were set aside "
+            "automatically.",
+        ))
+
+    # -- what this means --
+    if t1_items:
+        rows.append((
+            "What this means",
+            "These names exist and are actively managed in DNS by someone using "
+            "outside providers, yet they weren't in the records we were given. That "
+            "is consistent with locality domains having delegation activity the "
+            "registry's own list doesn't capture.",
+        ))
+    else:
+        rows.append((
+            "What this means",
+            "No names with their own managed zones (delegated zones) were found in "
+            "this scan. Ordinary DNS records or no records were found instead.",
+        ))
+
+    # -- what this does NOT prove (mandatory, visually distinct) --
+    rows.append((
+        "⚠  What this does NOT prove",
+        "This compares against the known-domain list we were given, which may be "
+        "incomplete. It shows these names are active and unlisted here — not that "
+        "anyone deliberately hid them. Absence from a scan is never proof a name "
+        "doesn't exist: names can be missed if they weren't in the tested word list, "
+        "if DNS queries were blocked, or if the zone wasn't crawled. Strong findings "
+        "indicate active DNS delegation — they do not on their own confirm a "
+        "regulatory gap or intentional omission.",
+    ))
+
+    return rows
+
+
 def build_how_to_read_rows() -> list[tuple[str, str]]:
-    """Build short coworker guidance for the How to Read workbook sheet."""
+    """Build coworker guidance for the How to Read workbook sheet.
+
+    EXPORT-REDESIGN: updated to reflect the new tab order, the tier system,
+    key evidence concepts in plain language, and accurate limitations.
+    Stale references to the pre-tier evidence model are removed.
+    """
     return [
         (
-            "What this report is for",
-            "This report checks whether live DNS contains child names under known 3rd-level "
-            ".US domains that were not listed in the system input.",
+            "Tab order",
+            "Tab 1 (Plain-English Summary) — start here. It explains what was "
+            "found and what it means in ordinary language, without technical codes. "
+            "Tab 2 (How to Read) — this sheet. "
+            "Tab 3 (Evidence Review) — one row per scanned base domain, with "
+            "summary evidence value and domain-level notes. "
+            "Tab 4 (Summary) — detailed per-domain summary with counts. "
+            "Tab 5 (Findings) — every confirmed DNS record, sorted by Tier. "
+            "Tab 6 (Diagnostics) — suppressed, withheld, and inconclusive rows "
+            "for audit/review. "
+            "Remaining tabs: Scan Settings, Errors/Warnings, and (if present) "
+            "Registry Matrix (Lane 1 known-domain comparison).",
+        ),
+        (
+            "Tier — what it means",
+            "Every row in the Findings sheet has a Tier that ranks the strength "
+            "of the evidence:\n"
+            "  T1 – Delegated zone: the name is set up as its own managed zone "
+            "in DNS, run by an outside provider. This is the strongest evidence "
+            "class — it means real infrastructure exists.\n"
+            "  T2 – Ordinary record: a DNS record (address, mail routing, alias, "
+            "etc.) exists for the name. Meaningful but not as strong as a "
+            "delegated zone.\n"
+            "  T3 – Known / base: the name was already on the supplied known-domain "
+            "list, or is the scanned base domain itself.\n"
+            "  T4 – Weak / diagnostic: rows that are suppressed, withheld, or "
+            "low-confidence (for example, automated parking responses). These "
+            "appear in Diagnostics, not Findings.",
+        ),
+        (
+            "Delegated zone — plain language",
+            "A delegated zone means the name has its own set of servers that run "
+            "it in DNS — separate from the registry's servers. Think of it like "
+            "a tenant who has installed their own lock and manages their own space "
+            "independently. The name has NS records pointing to those outside "
+            "servers, and usually an SOA record that confirms the zone is "
+            "independently administered.",
+        ),
+        (
+            "No website — why that's normal",
+            "A delegated zone often has no website (no A record / no webpage). "
+            "That is normal and expected: the servers run the DNS zone, not a "
+            "public-facing site. Absence of a website does not weaken the "
+            "delegation evidence.",
+        ),
+        (
+            "Automated placeholder response — what it is",
+            "Some registrars insert a TXT record on every name under a zone they "
+            "park, saying something like 'this domain may be available.' That is "
+            "an automated message from the registrar's system, not a real finding. "
+            "This tool detects and sets these aside automatically; they appear in "
+            "Diagnostics under 'withheld' status.",
         ),
         (
             "Known domain",
-            "Known domain = Yes means the discovered name was already listed in the input/system "
-            "data. Known domain = No means the name was found in live DNS but was not listed in "
-            "the input/system data.",
-        ),
-        (
-            "New child domains found",
-            "Lists DNS names beneath the scanned base domain that were found in live DNS testing "
-            "but were not already listed in the system input. Some may be service hostnames "
-            "(for example www or mail) rather than separately registered domains.",
+            "'Known domain = yes' means the discovered name was already on the "
+            "supplied known-domain list. 'Known domain = no' means the name was "
+            "found in live DNS but was not on that list. The known-domain list we "
+            "compare against may itself be incomplete.",
         ),
         (
             "Evidence value — Strong",
-            "Strong evidence usually means a new delegated child domain was found with NS or SOA "
-            "records.",
+            "Strong evidence means a new delegated child domain was found with NS "
+            "or SOA records pointing to outside servers. Corresponds to Tier 1.",
         ),
         (
-            "Evidence value — Moderate",
-            "Moderate evidence means a new meaningful child name was found, such as an "
-            "organizational or service name.",
-        ),
-        (
-            "Evidence value — Limited",
-            "Limited evidence usually means a generic or technical hostname such as www, mail, or "
-            "autodiscover, or a DNS alias pointing to a domain already known in the system.",
+            "Evidence value — Moderate / Limited",
+            "Moderate: a new meaningful child name was found (organisational or "
+            "service name) — Tier 2. Limited: a generic or technical hostname "
+            "(www, mail, autodiscover) or a DNS alias — Tier 2 or 3.",
         ),
         (
             "Evidence value — Validation only",
-            "Known domains validated are not new discoveries. They confirm names already listed "
-            "in the system input.",
+            "Known domains validated are not new discoveries. They confirm names "
+            "already on the supplied list — Tier 3.",
         ),
         (
             "Why column",
-            "The Why column explains, in plain language, why each row received its evidence "
-            "value or classification.",
-        ),
-        (
-            "What this report cannot prove",
-            "No records discovered does not prove no child domains exist. It only means none were "
-            "found using the selected methods.",
+            "The Why column explains, in plain language, why each row received "
+            "its evidence value or classification.",
         ),
         (
             "Suggested review path",
-            "Open Evidence Review first. Focus on Strong and Moderate rows for coworker review. "
-            "Read Why for context. Use Verification guidance for optional independent dig checks.",
+            "Start with Tab 1 (Plain-English Summary) for a human-readable "
+            "account. Then open Findings (Tab 5) and filter or sort by Tier: "
+            "focus on T1 first, then T2. Read the Why column for context. Use "
+            "Verification guidance for optional independent checks. "
+            "Diagnostics (Tab 6) holds suppressed and withheld rows — review "
+            "these only if you want to audit the suppression logic.",
+        ),
+        (
+            "⚠  What this report cannot prove",
+            "Absence from this scan is NOT proof a name doesn't exist. Names can "
+            "be missed if they weren't in the tested word list, if DNS queries "
+            "were blocked, or if a zone wasn't crawled. Strong findings (Tier 1) "
+            "confirm active DNS delegation — they do not on their own establish "
+            "a regulatory gap or deliberate omission. The known-domain list used "
+            "for comparison may be incomplete.",
         ),
     ]
 
@@ -3133,9 +3464,30 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
     path = output_dir / f"{_workbook_report_stem(result.scan_timestamp)}.xlsx"
 
     workbook = Workbook()
-    review_sheet = workbook.active
-    review_sheet.title = "Evidence Review"
 
+    # EXPORT-REDESIGN: Tab 1 — plain-English summary (first, for non-technical readers).
+    plain_english_sheet = workbook.active
+    plain_english_sheet.title = "Plain-English Summary"
+    _write_table_sheet(
+        plain_english_sheet,
+        [],
+        build_plain_english_summary_rows(result),
+        wrap_column_keys={"value"},
+        tuple_column_labels=("topic", "Section", "value", "Details"),
+    )
+
+    # Tab 2 — How to Read (updated for new tab order + tier system).
+    how_to_read_sheet = workbook.create_sheet("How to Read")
+    _write_table_sheet(
+        how_to_read_sheet,
+        [],
+        build_how_to_read_rows(),
+        wrap_column_keys={"value"},
+        tuple_column_labels=("topic", "Topic", "value", "Explanation"),
+    )
+
+    # Tab 3 — Evidence Review (domain-level summary).
+    review_sheet = workbook.create_sheet("Evidence Review")
     review_rows = [_coworker_display_row(row) for row in build_evidence_review_rows(result)]
     _write_table_sheet(
         review_sheet,
@@ -3154,15 +3506,6 @@ def export_xlsx_report(result: ScanRunResult, output_dir: Path) -> Path:
         },
         highlight_column_key="evidence_value",
         highlight_fill_map=EVIDENCE_VALUE_FILLS,
-    )
-
-    how_to_read_sheet = workbook.create_sheet("How to Read", 1)
-    _write_table_sheet(
-        how_to_read_sheet,
-        [],
-        build_how_to_read_rows(),
-        wrap_column_keys={"value"},
-        tuple_column_labels=("topic", "Topic", "value", "Explanation"),
     )
 
     summary_sheet = workbook.create_sheet("Summary")
