@@ -3313,6 +3313,15 @@ def scan_domain(
 
     # --- Ticket T31 Lane 1: registry-known name validation + evidence matrix ---
     # Runs after all candidate testing so existing scan results can be reused.
+    # WC-FIX2: emit a preflight notice when Lane 1 will no-op so the operator
+    # knows it didn't run rather than silently receiving no matrix sheet.
+    if not input_record or not input_record.registry_known_names:
+        _emit(
+            f"  Lane 1 / Registry Matrix: no registry_known_names for {domain} "
+            "-- skipping. Add a registry_known_names column to enable this check.",
+            progress,
+            messages,
+        )
     _validate_registry_known_names(
         input_record,
         domain,
