@@ -1,16 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for US Locality DNS Discovery Tool.
+"""PyInstaller spec for US Locality DNS Discovery Tool - PKG.2 windowed operator build.
 
-Build command: pyinstaller USLocalityDNSDiscovery.spec
-Packaged artifact: dist/USLocalityDNSDiscovery.exe
+Build command (use _build_pkg2.py to stamp SOURCE_COMMIT first):
+    python _build_pkg2.py
 
-Release version: 0.25.0
-Source commit: a71f6ad  (main, post-T32: T31 Lane-1 registry matrix + T32 NODATA classification)
+Release version: 0.26.0
+Source commit: stamped at build time by _build_pkg2.py (git rev-parse --short HEAD).
 
-Verification:
-  USLocalityDNSDiscovery.exe --batch-verify
-  Windowed build: output written to batch_verify_report.txt (beside the exe or in output/).
-  Console/source build: output goes to stdout as before.
+Windowed operator build:
+  - console=False: no console window on launch or during any operation including export.
+  - --batch-verify is intentionally not exposed in this artifact (code preserved in source).
+  - All wordlists bundled; no runtime git subprocess (provenance is a baked-in constant).
 """
 
 block_cipher = None
@@ -20,7 +20,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        # Wordlists: all 7 label files (civic_departments, delegated_manager_clues,
+        # Wordlists: all label files bundled (civic_departments,
         # dns_common, light_evidence, public_services, rfc1480, schools_libraries).
         ("wordlists", "wordlists"),
     ],
@@ -66,8 +66,9 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
-    # console=False: windowed operator build — no console on double-click.
-    # --batch-verify detects the no-stdout context and writes to a file instead.
+    # console=False: windowed operator build.
+    # No console window on launch, during scan, or during export.
+    # --batch-verify code is preserved in source but not exposed in this artifact.
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
