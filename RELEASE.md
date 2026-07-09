@@ -5,9 +5,11 @@ packaged with PyInstaller. It is **not** a web application.
 
 ## Source of truth
 
-- **Local Git** at the repository root is the only source control boundary today.
-- **No remote** is configured. Commits exist on this machine only until a remote
-  is added deliberately.
+- **Git** at the repository root is the source control boundary. A GitHub remote
+  named `origin` (`S-Pillow/us-locality-dns-discovery`) is configured; feature
+  branches push to it and `main` is the stable branch.
+- Releases are published from `origin`; the packaged EXE is distributed as a
+  GitHub Release artifact rather than copied by hand.
 - **Cursor chat transcripts and workspace metadata are not source control.**
 
 ## How to run
