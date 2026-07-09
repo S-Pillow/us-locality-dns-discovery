@@ -108,6 +108,18 @@ class DiscoveryApp(tk.Tk):
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_mousewheel(event) -> None:
+            # When the pointer is over the Status/Log box, let that widget scroll
+            # itself instead of scrolling the whole window (its own Text class
+            # binding handles the wheel).  Otherwise scroll the outer canvas.
+            try:
+                widget = self.winfo_containing(event.x_root, event.y_root)
+            except tk.TclError:
+                widget = None
+            node = widget
+            while node is not None:
+                if node is getattr(self, "log_text", None):
+                    return
+                node = getattr(node, "master", None)
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
@@ -159,6 +171,17 @@ class DiscoveryApp(tk.Tk):
             variable=self.include_custom_var,
         )
         self.custom_wordlist_check.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+
+        ttk.Label(
+            wordlist_frame,
+            text=(
+                "Sources are set automatically by the scan profile. "
+                "Switch to Deep Targeted to choose them manually."
+            ),
+            foreground="#555555",
+            wraplength=840,
+            justify=tk.LEFT,
+        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(6, 0))
 
         options_frame = ttk.LabelFrame(main, text="Scan Profile", padding=8)
         options_frame.pack(fill=tk.X, pady=(0, 8))
@@ -951,6 +974,15 @@ class DiscoveryApp(tk.Tk):
 
         self._log("Export complete:")
         self._log(f"  Output folder: {output_dir}")
+        exported_files: list[Path] = []
+        for path in (
+            outcome.xlsx_path,
+            outcome.csv_path,
+            outcome.summary_csv_path,
+            outcome.json_path,
+        ):
+            if path:
+                exported_files.append(path)
         if outcome.xlsx_path:
             self._log(f"  XLSX: {outcome.xlsx_path}")
         if outcome.csv_path:
@@ -961,6 +993,60 @@ class DiscoveryApp(tk.Tk):
             self._log(f"  JSON: {outcome.json_path}")
         self._log(f"  Rows exported: {outcome.row_count}")
         self._log(f"  Domains scanned: {outcome.domain_count}")
+
+        self._show_export_success(output_dir, exported_files)
+
+    def _show_export_success(self, output_dir: Path, files: list[Path]) -> None:
+        """Confirm a successful export and offer to open the output folder."""
+        dialog = tk.Toplevel(self)
+        dialog.title("Export complete")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text="Export complete. The following files were written:",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        if files:
+            file_lines = "\n".join(f"• {path.name}" for path in files)
+        else:
+            file_lines = "(no files reported)"
+        ttk.Label(frame, text=file_lines, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
+
+        ttk.Label(
+            frame,
+            text=f"Folder: {output_dir}",
+            foreground="#555555",
+            wraplength=460,
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        button_row = ttk.Frame(frame)
+        button_row.pack(anchor=tk.E)
+
+        def _open_and_close() -> None:
+            try:
+                os.startfile(output_dir)  # noqa: S606 — Windows folder open for operator convenience
+            except OSError as exc:
+                self._log(f"Could not open output folder: {exc}")
+                messagebox.showerror("Open folder", f"Could not open output folder:\n{exc}")
+            dialog.destroy()
+
+        ttk.Button(button_row, text="Open Folder", command=_open_and_close).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+        ttk.Button(button_row, text="Close", command=dialog.destroy).pack(side=tk.LEFT)
+
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        dialog.geometry(f"+{self.winfo_rootx() + 80}+{self.winfo_rooty() + 80}")
+        self.wait_window(dialog)
 
 
 def _batch_verify() -> None:  # noqa: C901
