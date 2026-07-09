@@ -80,7 +80,7 @@ flowchart TD
 
 ## Current status
 
-This version is **mission-complete** (v0.25.0, source commit `a71f6ad`, packaged build verified). It includes:
+This version is **mission-complete** (v0.26.0). No version or commit is hand-maintained in this document: source-mode reports derive `source_commit` live from git HEAD at runtime, and the packaged EXE carries a commit stamped into `scanner/version.py` at build time by `_build_pkg2.py`. It includes:
 
 - **Registry evidence matrix (Lane 1)** — validates registry-known names against live DNS and your portal/system view; surfaces strong-gap rows in the XLSX Registry Matrix sheet.
 - **Two-lane evidence model** — Lane 1 (registry-known validation) and Lane 2 (wordlist candidate discovery) produce separate, labelled rows in the workbook.
@@ -90,6 +90,7 @@ This version is **mission-complete** (v0.25.0, source commit `a71f6ad`, packaged
 - **NODATA parent-authority classification (T32)** — NOERROR + no answer + parent SOA in authority is classified as in-zone but not delegated; skipping deeper names in this state is not proof of absence.
 - **Wall-clock budget cap (29C)** — authoritative delegation verifier is capped at 2.0 s per candidate; recursive fallback runs outside the cap.
 - **Auth-NS unreachable short-circuit (29B)** — per-run cache of unreachable nameserver IPs.
+- **Windowed operator EXE (PKG.2, v0.26.0)** — single-file PyInstaller build with no console window on launch, scan, or export; `SOURCE_COMMIT` is stamped at build time for true artifact provenance.
 - Full Tkinter desktop GUI with threaded scan, phase/progress display, cancel, and partial-result export.
 
 ## Evidence model (workbook)
