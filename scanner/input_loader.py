@@ -509,21 +509,39 @@ def _load_csv(path: Path) -> DomainLoadResult:
     )
 
 
+# Non-OSError failures that can occur while reading/parsing an input file.
+# UnicodeDecodeError: file is not valid UTF-8 (e.g. Latin-1 / UTF-16 export).
+# csv.Error: malformed CSV content (e.g. a NUL byte -> "line contains NUL").
+_ENCODING_HINT = (
+    " The file could not be read as UTF-8 text. Re-save it as UTF-8 "
+    "(CSV UTF-8 in Excel) or a plain .txt/.csv domain list and try again."
+)
+
+
 def load_domain_inputs(path: Path) -> DomainLoadResult:
-    """Load domain input records from a TXT or CSV file."""
-    if path.suffix.lower() == ".txt":
-        try:
-            return _load_txt(path)
-        except OSError as exc:
-            return DomainLoadResult(error=f"Failed to read domain file: {exc}")
+    """Load domain input records from a TXT or CSV file.
 
-    if path.suffix.lower() == ".csv":
-        try:
-            return _load_csv(path)
-        except OSError as exc:
-            return DomainLoadResult(error=f"Failed to read domain file: {exc}")
+    Any failure to read or parse the file is returned as a
+    ``DomainLoadResult(error=...)`` so the GUI can surface a clear operator
+    message instead of crashing the scan/preflight thread with an unhandled
+    exception (AIPF 15.3 encoding + recovery-path contract).
+    """
+    suffix = path.suffix.lower()
+    if suffix not in (".txt", ".csv"):
+        return DomainLoadResult(error=f"Domain file must be .txt or .csv (got {path.suffix})")
 
-    return DomainLoadResult(error=f"Domain file must be .txt or .csv (got {path.suffix})")
+    loader = _load_txt if suffix == ".txt" else _load_csv
+    try:
+        return loader(path)
+    except UnicodeDecodeError as exc:
+        return DomainLoadResult(error=f"Failed to read domain file: {exc}.{_ENCODING_HINT}")
+    except csv.Error as exc:
+        return DomainLoadResult(
+            error=f"Failed to parse CSV domain file: {exc}. The file may be corrupt "
+            "or contain non-text data (for example a NUL byte)."
+        )
+    except OSError as exc:
+        return DomainLoadResult(error=f"Failed to read domain file: {exc}")
 
 
 def load_domains(path: Path) -> list[str]:
