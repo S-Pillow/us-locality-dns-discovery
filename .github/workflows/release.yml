@@ -1,0 +1,83 @@
+name: Build and Release EXE
+
+# Builds the Windows desktop executable in CI (AIPF 12.7 / 16.5 CI-first
+# packaging) and, for version tags, publishes it as a downloadable GitHub
+# Release asset.  Local packaging is never required of the operator.
+#
+#   workflow_dispatch  -> build + verify + upload artifact (test build)
+#   push tag 'v*'      -> build + verify + publish GitHub Release with the .exe
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write        # required to create a Release and upload assets
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout (full history so the commit can be stamped)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: Run mocked regression tests (source gate before packaging)
+        run: python -m pytest tests/regression -m "not live" -q
+
+      - name: Build windowed EXE (stamps commit, then PyInstaller)
+        run: python _build_pkg2.py
+
+      - name: Verify artifact + provenance + checksum
+        shell: pwsh
+        run: |
+          $exe = "dist/USLocalityDNSDiscovery.exe"
+          if (-not (Test-Path $exe)) { throw "EXE not produced at $exe" }
+          $size = (Get-Item $exe).Length
+          Write-Host ("EXE size: {0:N1} MB" -f ($size / 1MB))
+          if ($size -lt 5MB) { throw "EXE suspiciously small ($size bytes) - build likely incomplete" }
+          $head = (git rev-parse --short HEAD).Trim()
+          $stamped = (Select-String -Path scanner/version.py `
+            -Pattern '^SOURCE_COMMIT\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          Write-Host "HEAD=$head  stamped SOURCE_COMMIT=$stamped"
+          if ($head -ne $stamped) { throw "Provenance mismatch: HEAD $head != stamped $stamped" }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "$hash  USLocalityDNSDiscovery.exe" | Out-File -Encoding ascii "$exe.sha256"
+          Write-Host "SHA-256: $hash"
+
+      - name: Upload build artifact (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: USLocalityDNSDiscovery-exe
+          path: |
+            dist/USLocalityDNSDiscovery.exe
+            dist/USLocalityDNSDiscovery.exe.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tagged runs only)
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $commit = (git rev-parse --short HEAD).Trim()
+          gh release create $tag `
+            "dist/USLocalityDNSDiscovery.exe" `
+            "dist/USLocalityDNSDiscovery.exe.sha256" `
+            --title "US Locality DNS Discovery $tag" `
+            --notes "Windows desktop build (commit $commit), built and verified by GitHub Actions. Double-click USLocalityDNSDiscovery.exe to run - no Python required. Verify integrity against the .sha256 file. This tool reports DNS discovery evidence only and does not claim complete zone enumeration."
